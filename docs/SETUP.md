@@ -56,11 +56,11 @@ code file from the operator's state directory.
 | Ubuntu 24.04 amd64 | Install the .deb with "sudo apt install ./NAME.deb". |
 | Apple Silicon Mac | Extract the ZIP with Archive Utility and move the app into Applications. It is ad hoc signed and unnotarized; macOS may block first launch. |
 
-Verify the published SHA-256 checksums and GitHub attestations first:
+Verify the published SHA-256 checksums and GitHub attestations. Both tags point to the same source commit.
 
 ```sh
 sha256sum -c SHA256SUMS.txt
-gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.0-alpha.2
+gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.0-alpha.2-rc.3
 ```
 
 1. Open **Connect to Vault** and enter the root HTTPS URL. If the issuer is
