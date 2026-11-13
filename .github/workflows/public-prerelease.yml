@@ -154,7 +154,7 @@ jobs:
             --jq '.jobs[] | select(.name | startswith("build (")) | .id' > build-logs/ids
           test "$(wc -l < build-logs/ids)" = 3
           while read -r job; do
-            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "build-logs/$job.txt"
+            gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "build-logs/$job.txt"
           done < build-logs/ids
           bash scripts/scan-public-release.sh build-logs
           (cd release && test "$(find . -maxdepth 1 -type f | wc -l)" = 4 && sha256sum Voltura-Vault-* > SHA256SUMS.txt)
