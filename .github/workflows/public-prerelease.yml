@@ -3,6 +3,7 @@ name: Public desktop prerelease
 on:
   push:
     tags: ['v0.1.0-alpha.2*']
+    branches: ['feature/public-desktop-alpha2']
 
 permissions:
   contents: read
@@ -55,6 +56,22 @@ jobs:
           npm test
           if [[ "$PLATFORM" == linux ]]; then cargo test --locked --workspace; fi
           npm run desktop:build -- --config src-tauri/tauri.public.conf.json --target "$TARGET" --bundles "$BUNDLE" -- --locked
+      - name: Install Windows package on the disposable runner
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $setup = Get-ChildItem "src-tauri/target/$env:TARGET/release/bundle/nsis" -Filter '*-setup.exe' | Select-Object -First 1
+          $dest = Join-Path $env:RUNNER_TEMP 'VaultAlphaSmoke'
+          $install = Start-Process -FilePath $setup.FullName -ArgumentList '/S',"/D=$dest" -WindowStyle Hidden -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "NSIS installer exited with $($install.ExitCode)" }
+          $app = Start-Process -FilePath (Join-Path $dest 'voltura-vault-public-alpha.exe') -WindowStyle Hidden -PassThru
+          try {
+            if ($app.WaitForExit(8000)) { throw "Installed app exited with $($app.ExitCode)" }
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id }
+          }
       - name: Stage and unpack assets
         env:
           TARGET: ${{ matrix.target }}
