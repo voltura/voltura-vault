@@ -4,6 +4,14 @@ Use synthetic data for this prerelease. Keep the vault API on a private LAN or
 an existing VPN such as WireGuard. The operator provides DNS, network access,
 and a TLS certificate and key for the API hostname.
 
+Get the desktop package, Docker kit and `SHA256SUMS.txt` from the
+[v0.1.0-alpha.2 release](https://github.com/voltura/voltura-vault/releases/tag/v0.1.0-alpha.2).
+The Windows installer reached first run in Windows Sandbox. The Ubuntu package
+reached first run in a clean Ubuntu 24.04 container. The macOS bundle passed
+architecture and signature checks. A scripted client recovered a synthetic note
+and attachment in a Docker restore drill. Full pairing, offline reconnect and
+restore with the packaged apps, plus interactive macOS testing, remain pending.
+
 ## Server
 
 Use a Linux Docker host with Docker Compose, Bash, Python 3, curl and restic.
@@ -56,11 +64,13 @@ code file from the operator's state directory.
 | Ubuntu 24.04 amd64 | Install the .deb with "sudo apt install ./NAME.deb". |
 | Apple Silicon Mac | Extract the ZIP with Archive Utility and move the app into Applications. It is ad hoc signed and unnotarized; macOS may block first launch. |
 
-Verify the published SHA-256 checksums and GitHub attestations. Both tags point to the same source commit.
+Verify the published SHA-256 checksums and GitHub attestations. The attestation
+uses the build tag, which points to the same commit as the release tag. Replace
+`PACKAGE` with the name of the downloaded file.
 
 ```sh
 sha256sum -c SHA256SUMS.txt
-gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.0-alpha.2-rc.3
+gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.0-alpha.2-rc.3 --signer-workflow voltura/voltura-vault/.github/workflows/public-prerelease.yml
 ```
 
 1. Open **Connect to Vault** and enter the root HTTPS URL. If the issuer is
@@ -121,6 +131,18 @@ the API's HTTPS origin. These are origins without a trailing slash. Build with
 hosted site's "connect-src" policy. The browser uses system certificate
 trust and bearer sessions. Control who can change the hosted client: it can
 read plaintext on an unlocked device.
+
+## Try the vault with synthetic data
+
+- Edit an item offline, reconnect and sync. If two devices edit the same item,
+  review the conflicting revisions before choosing which changes to keep.
+- Attach a file up to 100 MB. Try downloading it on demand, keeping it offline
+  and deleting it with confirmation. Earlier backups can still contain the file.
+- In **Settings → Import from Bitwarden**, preview a personal plaintext or
+  password-protected JSON export. The preview reports duplicates and changed
+  items. Changed records are skipped for manual review. Transfer attachment
+  files separately. The importer refuses exports with organization ownership
+  or items that require password re-prompt.
 
 ## Build from source
 
