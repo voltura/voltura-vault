@@ -1,0 +1,13 @@
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!crates/server/
+!crates/server/Cargo.toml
+!crates/server/src/
+!crates/server/src/**
+!crates/server-auth/
+!crates/server-auth/Cargo.toml
+!crates/server-auth/src/
+!crates/server-auth/src/**

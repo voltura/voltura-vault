@@ -1,0 +1,11 @@
+{
+  "id": "/", "name": "Voltura Vault", "short_name": "Vault",
+  "description": "A private vault for passwords, notes, and files",
+  "start_url": "/", "scope": "/", "display": "standalone",
+  "background_color": "#071525", "theme_color": "#071525",
+  "icons": [
+    {"src":"/icon-192.png?v=3","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"/icon-512.png?v=3","sizes":"512x512","type":"image/png","purpose":"any"},
+    {"src":"/icon-maskable-512.png?v=3","sizes":"512x512","type":"image/png","purpose":"maskable"}
+  ]
+}

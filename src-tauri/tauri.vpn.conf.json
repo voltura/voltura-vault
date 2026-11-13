@@ -1,0 +1,32 @@
+{
+  "productName": "Voltura Vault",
+  "identifier": "se.voltura.vault.vpn",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Voltura Vault",
+        "url": "index.html",
+        "useHttpsScheme": true,
+        "create": false,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 400,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://vault-api.test ipc: https://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "shortDescription": "Voltura Vault client for the private VPN.",
+    "publisher": "Voltura AB",
+    "copyright": "© Voltura AB 2026"
+  },
+  "build": {
+    "features": [
+      "vpn-client"
+    ]
+  }
+}

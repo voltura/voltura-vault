@@ -1,0 +1,38 @@
+{
+  "name": "voltura-vault",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A private vault for passwords, notes, and files",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "npm run check && vite build && node scripts/build-sw.mjs",
+    "preview": "vite preview --host 127.0.0.1",
+    "icons": "node scripts/icons.mjs",
+    "desktop": "tauri dev",
+    "desktop:build": "tauri build",
+    "inventory": "npm sbom --sbom-format cyclonedx > output/sbom.cdx.json"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@tauri-apps/api": "2.12.4",
+    "idb": "8.0.4",
+    "libsodium-wrappers-sumo": "0.8.4",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
+    "@types/node": "25.0.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "fake-indexeddb": "6.2.5",
+    "sharp": "0.35.5",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  }
+}

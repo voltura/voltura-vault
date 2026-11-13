@@ -1,0 +1,35 @@
+[workspace]
+
+[package]
+name = "voltura-vault"
+version = "0.1.0"
+description = "A private vault for passwords, notes, and files"
+edition = "2024"
+publish = false
+
+[features]
+vpn-client = ["tauri/tray-icon", "dep:tokio"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.5", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "=0.23.1"
+sha2 = "=0.10.9"
+rand = { version = "0.8", features = ["getrandom"] }
+zeroize = "1.8"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "=1.54.1", features = ["time"], optional = true }
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Networking_WindowsWebServices", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+[[bin]]
+name = "hello-capability"
+path = "src/bin/hello-capability.rs"
+
+[[bin]]
+name = "voltura-vault"
+path = "src/main.rs"
