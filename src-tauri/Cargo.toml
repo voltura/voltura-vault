@@ -2,7 +2,7 @@
 
 [package]
 name = "voltura-vault"
-version = "0.1.0"
+version = "0.1.1"
 description = "A private vault for passwords, notes, and files"
 edition = "2024"
 publish = false

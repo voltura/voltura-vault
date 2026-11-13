@@ -5,6 +5,7 @@ import { PALETTES } from './appearance';
 import { Popup, ThemedSelect, type SelectOption } from './Popup';
 import { VaultList } from './VaultList';
 import { ItemFields } from './ItemFields';
+import { GeneratorDialog } from './GeneratorDialog';
 import { itemDraft, itemType, ITEM_TYPES, type ItemDraft, type ItemType } from './item-editor';
 import { readPreference, TIMEOUTS, writePreference } from './preferences';
 import type { AttachmentView, HelloCredential } from './format';
@@ -264,6 +265,8 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
   const [attachmentRecord, setAttachmentRecord] = useState<VaultRecord>();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readPreference('vault-sidebar', 'expanded') === 'collapsed');
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [recoveryExpanded, setRecoveryExpanded] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
   const [folderEdit, setFolderEdit] = useState<{ key?: string; name: string }>();
   const [itemConfirmation, setItemConfirmation] = useState<'discard' | 'delete'>();
   const folders = vaultFolders(m.notes);
@@ -276,6 +279,15 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
   const activeFilter = filters.some(option => option.value === filter) ? filter : 'all';
   const folderKey = activeFilter.startsWith('folder:') ? activeFilter.slice(7) : undefined;
   const blocked = m.busy || m.dirty;
+  const optionalRecovery = m.status.exists && !m.status.requiresRecoveryFile;
+  const recoveryFields = <>
+    {!optionalRecovery && <label htmlFor="vault-recovery-file">Recovery key file</label>}
+    <input id="vault-recovery-file" type="file" accept=".vvrk" disabled={m.busy} required={!optionalRecovery}
+      aria-label={optionalRecovery ? 'Choose recovery key file' : undefined} aria-describedby="vault-recovery-help"
+      onChange={event => a.setRecoveryFile(event.target.files?.[0])}/>
+    <p id="vault-recovery-help" className="fine">{m.status.exists ? 'Choose your .vvrk file to recover access. Recovering a newer vault can replace older vault data on this device.'
+      : 'Save the downloaded file offline, then select it here to confirm you have it.'}</p>
+  </>;
   function changeFilter(value: string) {
     setFilter(value); setQuery(''); setFolderEdit(undefined); a.select(-1); a.navigate('vault');
   }
@@ -313,6 +325,10 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
         <button aria-label="Vault" title={sidebarCollapsed ? 'Vault' : undefined} aria-current={m.page === 'vault' ? 'page' : undefined} className={m.page === 'vault' ? 'active' : ''} onClick={() => a.navigate('vault')}><Icon name="vault"/><span className="nav-label">Vault</span></button>
         <button aria-label="Files" title={sidebarCollapsed ? 'Files' : undefined} aria-current={m.page === 'attachments' ? 'page' : undefined} className={m.page === 'attachments' ? 'active' : ''} disabled={m.dirty} onClick={() => a.navigate('attachments')}><Icon name="file"/><span className="nav-label">Files</span>{m.unlocked && !m.hidden && m.status.attachments.length > 0 && <span className="count">{m.status.attachments.length}</span>}</button>
         <button aria-label="Settings" title={sidebarCollapsed ? 'Settings' : undefined} aria-current={m.page === 'device' ? 'page' : undefined} className={m.page === 'device' ? 'active' : ''} disabled={m.dirty} onClick={() => a.navigate('device')}><Icon name="settings"/><span className="nav-label">Settings</span></button>
+        {m.unlocked && !m.hidden && <button type="button" className="sidebar-generator" aria-label="Generator"
+          aria-haspopup="dialog" title={sidebarCollapsed ? 'Generator' : undefined} disabled={m.busy} onClick={() => setGeneratorOpen(true)}>
+          <Icon name="refresh"/><span className="nav-label">Generator</span>
+        </button>}
       </nav>
       {m.unlocked && !m.hidden && <div className="vault-filters" aria-label="Vault filters">
         {baseFilters.map(option => <button type="button" key={option.value} aria-pressed={m.page === 'vault' && filter === option.value}
@@ -393,17 +409,21 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
               </div>
               {m.status.remote === 'new' && <><label htmlFor="setup">Server setup token</label><input id="setup" type="password" autoComplete="off" value={m.setup} onChange={e => a.setSetup(e.target.value)} disabled={m.busy} required maxLength={43}/></>}
               {!m.status.exists && <button className="calibrate-button" type="button" disabled={m.busy} onClick={a.downloadRecoveryKey}>Download recovery key</button>}
-              {(m.status.exists || m.recoveryDownloaded) && <>
-                <label htmlFor="vault-recovery-file">Recovery key file{m.status.exists && !m.status.requiresRecoveryFile ? ' (optional)' : ''}</label>
-                <input id="vault-recovery-file" type="file" accept=".vvrk" disabled={m.busy}
-                  required={!m.status.exists || m.status.requiresRecoveryFile}
-                  onChange={event => a.setRecoveryFile(event.target.files?.[0])}/>
-                <p className="fine">{m.status.exists ? 'Choose your .vvrk file to recover access. Recovering a newer vault can replace older vault data on this device.'
-                  : 'Save the downloaded file offline, then select it here to confirm you have it.'}</p>
-              </>}
+              {!optionalRecovery && (m.status.exists || m.recoveryDownloaded) && recoveryFields}
               {!m.status.exists && <button className="calibrate-button" type="button" disabled={m.busy} onClick={a.calibrate}>{m.calibration?.targetReached ? <><Icon name="check"/>Unlock time measured</> : 'Measure unlock time'}</button>}
               <button className="primary unlock-submit" type="submit" disabled={m.busy || !m.password || m.status.remote === 'unavailable' || (!m.status.exists && !m.calibration?.targetReached) || ((!m.status.exists || m.status.requiresRecoveryFile) && !m.recoveryFile)}>{m.busy ? 'Working…' : m.status.exists ? 'Unlock' : testBuild ? 'Create test vault' : 'Create vault'}{!m.busy && <Icon name="arrow"/>}</button>
               {m.helloAvailable && m.status.hello && <button className="calibrate-button" type="button" disabled={m.busy} onClick={a.unlockHello}>Unlock with Windows Hello</button>}
+              {optionalRecovery && <div className="unlock-recovery">
+                <button type="button" className="unlock-recovery-toggle"
+                  aria-expanded={recoveryExpanded} aria-controls="vault-recovery-fields" disabled={m.busy}
+                  onClick={() => {
+                    if (recoveryExpanded) a.setRecoveryFile(undefined);
+                    setRecoveryExpanded(!recoveryExpanded);
+                  }}>
+                  Recovery key file (optional)<Icon name="chevron"/>
+                </button>
+                <div id="vault-recovery-fields" hidden={!recoveryExpanded}>{recoveryExpanded && recoveryFields}</div>
+              </div>}
               {testBuild && <p className="test-notice">Test data only. Not ready for real passwords.</p>}
             </form>}
           </section> : <section className={`vault-grid ${hasDetail ? 'has-detail' : ''} ${hasDetail && m.mobileDetail ? 'show-detail' : ''}`}>
@@ -546,6 +566,7 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
           </section>)}
         </>}
         {m.importProgress && <ImportProgressDialog {...m.importProgress}/>}
+        {m.unlocked && !m.hidden && generatorOpen && <GeneratorDialog history={a.generatorHistory} close={() => setGeneratorOpen(false)}/>}
         {attachmentRecord && !m.hidden && <RecordAttachments record={attachmentRecord} model={m} actions={a} close={() => setAttachmentRecord(undefined)}/>}
         {folderEdit && !m.hidden && <FolderDialog folder={folderEdit}
           hasItems={!!folderEdit.key && m.notes.some(note => !note.trashed && note.item?.folder === folderEdit.key)}

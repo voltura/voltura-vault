@@ -4,7 +4,7 @@
 
 A self-hosted password manager for logins, secure notes, SSH keys and files. The app encrypts items and attachments on your device before syncing them to a server you operate.
 
-[Download v0.1.0-alpha.2](https://github.com/voltura/voltura-vault/releases/tag/v0.1.0-alpha.2) · [Product website](https://voltura-vault.voltura.se/) · [Setup and builds](docs/SETUP.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md)
+[Download v0.1.1](https://github.com/voltura/voltura-vault/releases/tag/v0.1.1) · [Product website](https://voltura-vault.voltura.se/) · [Setup and builds](docs/SETUP.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md)
 
 ## What it does
 

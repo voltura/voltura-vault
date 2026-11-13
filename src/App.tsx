@@ -231,7 +231,11 @@ export function App() {
     previousOnline.current = online;
     if (reconnected && unlocked && !busy && !dirty && canSync) void run(() => syncNow());
   }, [online, unlocked, busy, dirty, canSync]);
-  const changePage = (next: Page) => { setPage(next); setMobileDetail(false); };
+  const changePage = (next: Page) => {
+    if (page === 'vault' && next !== 'vault' && !unlocked) setRecoveryFile(undefined);
+    setPage(next);
+    setMobileDetail(false);
+  };
   async function doUnlock(hello?: HelloCredential) {
     const current = generation.current;
     const idleMs = timeout * 60_000;
