@@ -20,7 +20,7 @@ const testBuild = !import.meta.env.VITE_VAULT_PRODUCTION_RELEASE;
 export type Page = 'vault' | 'device' | 'attachments';
 export type Model = {
   page: Page; unlocked: boolean; hidden: boolean; busy: boolean; notice: string; error: string; syncPaused: boolean; rotationNeeded: boolean;
-  status: { exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable'; hello?: HelloCredential; helloOnly?: boolean; requiresRecoveryFile?: boolean; importAvailable?: boolean; rejectedServerData?: boolean };
+  status: { exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable'; hello?: HelloCredential; helloOnly?: boolean; requiresRecoveryFile?: boolean; server?: string | null; importAvailable?: boolean; rejectedServerData?: boolean };
   notes: VaultRecord[]; selected: number; newItem?: ImportedItem; draft: string; dirty: boolean;
   editor: ItemDraft;
   password: string; setup: string; recoveryFile?: File; recoveryDownloaded: boolean; calibration?: Calibration; online: boolean; mobileDetail: boolean;
@@ -31,11 +31,13 @@ export type Model = {
   recoveryVersions?: { id: string; size: number; created: number }[];
   sourcePassword: string; sourceRecovery: boolean;
   webUpdate: ReturnType<typeof useWebUpdate>;
-  independentWeb: boolean;
+  independentWeb: boolean; publicDesktop: boolean;
 };
 export type Actions = {
   navigate: (page: Page) => void; lock: () => void; unlock: () => void;
   connect: () => void;
+  checkPairing: () => void;
+  connectDesktop: (url: string, certificate?: File) => void;
   setPassword: (value: string) => void; calibrate: () => void; select: (index: number) => void;
   setSetup: (value: string) => void; setRecoveryFile: (file?: File) => void; downloadRecoveryKey: () => void; sync: () => void; newNote: (type: ItemType, folder?: string) => void; clone: (index: number) => void; resolve: () => void;
   saveFolder: (name: string, key?: string, remove?: boolean) => Promise<boolean>; setTrashed: (index: number, trashed: boolean) => void;
@@ -363,7 +365,8 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
             : m.notice && <Toast key={m.notice} message={m.notice} kind={m.busy ? 'progress' : 'status'}/>)}
         {m.hidden && m.unlocked ? <section className="empty"><Icon name="lock"/><h2>Content hidden</h2></section> : <>
           {m.page === 'vault' && (!m.unlocked ? <section className="unlock-layout">
-            {m.independentWeb && !m.status.exists && m.status.remote === 'unavailable' ? <div className="unlock-card">
+            {m.publicDesktop && !m.status.exists && m.status.remote === 'unavailable' ? <ConnectDesktop model={m} actions={a}/> :
+            m.independentWeb && !m.status.exists && m.status.remote === 'unavailable' ? <div className="unlock-card">
               <div className="unlock-mark"><Icon name="lock"/></div>
               <h2>Connect to your vault</h2>
               <p className="subtitle">Turn on WireGuard. If your browser asks for local network access, allow it for this site.</p>
@@ -373,6 +376,7 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
             <form className="unlock-card" onSubmit={event => { event.preventDefault(); setPasswordVisible(false); a.unlock(); }}>
               <div className="unlock-mark"><Icon name="lock"/></div>
               <h2>{m.status.exists ? 'Unlock your vault' : testBuild ? 'Create a test vault' : 'Create your vault'}</h2>
+              {m.publicDesktop && m.status.server && <p className="fine">{m.status.server}</p>}
               <p className="subtitle">{m.status.exists ? 'Enter your master password.' : testBuild ? 'Choose a password for this test vault.' : 'Choose a master password with at least 15 characters.'}</p>
               <label htmlFor="password">Master password</label>
               <div className="input-with-actions">
@@ -463,6 +467,11 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
                 {m.importPreview.unresolvedFolders > 0 && <p>{m.importPreview.unresolvedFolders} items reference folders missing from the export.</p>}
                 <p className="fine">{Object.entries(m.importPreview.types).map(([kind, count]) => `${kind}: ${count}`).join(' · ')}</p>
                 <p className="fine">JSON exports omit attachment bytes. {m.importPreview.attachments ? `${m.importPreview.attachments} attachment references were preserved.` : ''}</p></>}</>}
+            </article>}
+            {m.publicDesktop && m.unlocked && m.status.server && <article className="card">
+              <h3>Paired server</h3>
+              <p className="fine">{m.status.server}</p>
+              <button type="button" disabled={m.busy || m.dirty} onClick={a.checkPairing}>Check before changing servers</button>
             </article>}
             {m.unlocked && m.status.remote === 'configured' && !m.status.helloOnly && <article className="card">
               <h2>Source versions</h2>
@@ -556,4 +565,21 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
       </div>
     </main>
   </div>;
+}
+
+function ConnectDesktop({ model: m, actions: a }: { model: Model; actions: Actions }) {
+  const [url, setUrl] = useState(m.status.server ?? '');
+  const [certificate, setCertificate] = useState<File>();
+  return <form className="unlock-card" onSubmit={event => { event.preventDefault(); a.connectDesktop(url, certificate); }}>
+    <h2>Connect to Vault</h2>
+    <p className="subtitle">Enter the HTTPS address from your server operator.</p>
+    <label htmlFor="vault-server-url">Server URL</label>
+    <input id="vault-server-url" value={url} onChange={event => setUrl(event.target.value)} type="url"
+      autoComplete="off" maxLength={2048} placeholder="https://vault.example.com" required disabled={m.busy}/>
+    <label htmlFor="vault-server-ca">Public CA certificate (optional)</label>
+    <input id="vault-server-ca" type="file" accept=".cer,.crt,.pem,.der" disabled={m.busy}
+      onChange={event => setCertificate(event.target.files?.[0])}/>
+    <p className="fine">Select the public CA file from your operator if your device does not already trust the server.</p>
+    <button className="primary unlock-submit" type="submit" disabled={m.busy || !url}>{m.busy ? 'Connecting…' : 'Connect to Vault'}<Icon name="arrow"/></button>
+  </form>;
 }

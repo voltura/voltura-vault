@@ -14,6 +14,7 @@ uuid = { version = "=1.29.2", features = ["serde"] }
 base64 = "=0.23.1"
 zeroize = "=1.9.1"
 sha2 = "=0.10.9"
+url = "=2.5.8"
 ring = "=0.17.14"
 voltura-server-auth = { path = "../server-auth" }
 

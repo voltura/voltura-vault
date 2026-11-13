@@ -1,0 +1,44 @@
+services:
+  api:
+    build: ../..
+    image: voltura-vault-api:0.1.0-alpha.2
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      VOLTURA_API_HOST: ${VAULT_API_HOST:?Set VAULT_API_HOST}
+      VOLTURA_BROWSER_ORIGIN: ${VAULT_BROWSER_ORIGIN:-}
+      VOLTURA_LISTEN: 0.0.0.0
+      VOLTURA_MIN_KEY_EPOCH: ${VAULT_MIN_KEY_EPOCH:-1}
+    volumes:
+      - type: bind
+        source: ${VAULT_STATE_ROOT:?Set VAULT_STATE_ROOT}
+        target: /var/lib/voltura
+        bind: { create_host_path: false }
+    networks: [backend]
+  proxy:
+    image: nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+    user: "101:101"
+    read_only: true
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    ports:
+      - target: 8443
+        published: "${VAULT_HTTPS_PORT:-443}"
+        host_ip: "${VAULT_BIND_IP:?Set VAULT_BIND_IP to a private host address}"
+        protocol: tcp
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - type: bind
+        source: ${VAULT_TLS_DIR:?Set VAULT_TLS_DIR}
+        target: /run/vault-tls
+        read_only: true
+        bind: { create_host_path: false }
+    networks: [backend, ingress]
+networks:
+  backend:
+    internal: true
+  ingress: {}

@@ -11,11 +11,11 @@ A self-hosted password manager for logins, secure notes, SSH keys and files. The
 - Organize logins, cards, identities, notes and SSH keys with folders, search and custom fields.
 - Generate passwords, passphrases and usernames, and preview Bitwarden JSON before importing.
 - Attach files up to 100 MB and choose which encrypted files to keep available offline.
-- Use the responsive web app in a browser or build the Windows desktop client. Linux and macOS desktop configurations are previews.
+- Connect the Windows, Linux, or macOS desktop client to a server you run. Separate browser hosting is optional.
 
 ## Start here
 
-This is an early source release for self-hosters. It ships with reserved example hostnames, so it cannot connect to a real vault out of the box. The [setup guide](docs/SETUP.md) shows where to configure your own hosts and how to run a local preview. Try it with sample data and verify that you can restore your own backup before relying on it.
+The [setup guide](docs/SETUP.md) covers the Docker kit, HTTPS, desktop pairing and backups. The public desktop alpha uses a separate app profile. Try it with synthetic data and verify that you can restore a backup.
 
 ## Support development
 

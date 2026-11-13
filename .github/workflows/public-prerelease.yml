@@ -1,0 +1,151 @@
+name: Public desktop prerelease
+
+on:
+  push:
+    tags: ['v0.1.0-alpha.2*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+          - platform: linux
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundle: deb
+          - platform: macos
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundle: app
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '26.13.0'
+      - name: Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf p7zip-full
+      - name: Check and build
+        env:
+          TARGET: ${{ matrix.target }}
+          BUNDLE: ${{ matrix.bundle }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          rustup show active-toolchain
+          rustup target add "$TARGET"
+          npm ci
+          npm run check
+          npm test
+          if [[ "$PLATFORM" == linux ]]; then cargo test --locked --workspace; fi
+          npm run desktop:build -- --config src-tauri/tauri.public.conf.json --target "$TARGET" --bundles "$BUNDLE" -- --locked
+      - name: Stage and unpack assets
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir assets-out unpacked
+          bundle="src-tauri/target/$TARGET/release/bundle"
+          case "$PLATFORM" in
+            windows)
+              cp "$bundle"/nsis/*-setup.exe assets-out/Voltura-Vault-0.1.0-alpha.2-windows-x64.exe
+              "/c/Program Files/7-Zip/7z.exe" x -ounpacked assets-out/*.exe
+              ;;
+            linux)
+              cp "$bundle"/deb/*.deb assets-out/Voltura-Vault-0.1.0-alpha.2-ubuntu24.04-amd64.deb
+              dpkg-deb -x assets-out/*.deb unpacked
+              test "$(dpkg-deb -f assets-out/*.deb Architecture)" = amd64
+              git archive --format=zip --prefix=voltura-vault-0.1.0-alpha.2/ \
+                --output=assets-out/Voltura-Vault-0.1.0-alpha.2-docker-kit.zip HEAD -- \
+                LICENSE Dockerfile .dockerignore Cargo.toml Cargo.lock rust-toolchain.toml \
+                crates deploy/public docs/SETUP.md
+              unzip -q assets-out/*-docker-kit.zip -d unpacked
+              ;;
+            macos)
+              app=$(find "$bundle/macos" -maxdepth 1 -name '*.app' -type d)
+              test "$(lipo -archs "$app/Contents/MacOS/voltura-vault-public-alpha")" = arm64
+              codesign --verify --deep --strict "$app"
+              codesign -dv "$app" 2>&1 | grep -F 'Signature=adhoc'
+              ditto -c -k --sequesterRsrc --keepParent "$app" assets-out/Voltura-Vault-0.1.0-alpha.2-macos-arm64.zip
+              ditto -x -k assets-out/*-macos-arm64.zip unpacked
+              ;;
+          esac
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.25.4'
+          cache: false
+      - name: Scan source and unpacked assets
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            bash scripts/scan-public-release.sh unpacked python
+          else
+            bash scripts/scan-public-release.sh unpacked
+          fi
+      - name: Scan tracked source and Git history
+        if: matrix.platform == 'linux'
+        run: bash scripts/scan-public-release.sh source
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: vault-${{ matrix.platform }}
+          path: assets-out/*
+          if-no-files-found: error
+
+  provenance:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          path: release
+          pattern: vault-*
+          merge-multiple: true
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.25.4'
+          cache: false
+      - name: Hash exact assets and review build logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p build-logs
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.name | startswith("build (")) | .id' > build-logs/ids
+          test "$(wc -l < build-logs/ids)" = 3
+          while read -r job; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "build-logs/$job.txt"
+          done < build-logs/ids
+          bash scripts/scan-public-release.sh build-logs
+          (cd release && test "$(find . -maxdepth 1 -type f | wc -l)" = 4 && sha256sum Voltura-Vault-* > SHA256SUMS.txt)
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: release/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: reviewed-release
+          path: release/*
+          if-no-files-found: error

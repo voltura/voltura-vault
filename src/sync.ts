@@ -5,10 +5,13 @@ import { syncFiles, type VaultRequest } from './file-sync';
 
 import { encodeToken, packConfig, packRevision, unpackConfig, unpackRevision } from './wire';
 
-const ORIGIN = 'https://vault-api.test';
+import { callDesktop, publicDesktop } from './desktop-channel';
+
+export const ORIGIN = import.meta.env.VITE_VAULT_API_ORIGIN ?? 'https://vault-api.test';
+export const WEB_ORIGIN = import.meta.env.VITE_VAULT_WEB_ORIGIN ?? 'https://vault-ui.test';
 export const separateClient = () => {
   const url = self.location;
-  return ['https://tauri.localhost', 'https://vault-ui.test'].includes(url.origin)
+  return publicDesktop || ['https://tauri.localhost', WEB_ORIGIN].includes(url.origin)
     || (url.protocol === 'tauri:' && url.host === 'localhost');
 };
 export const syncEnabled = () => self.location.origin === ORIGIN || separateClient();
@@ -37,8 +40,18 @@ async function request(path: string, body?: unknown, token?: Uint8Array | string
     proof.set(sodium.crypto_sign_detached(message, write.privateKey), hash.length);
     headers.set('X-Vault-Write-Proof', encodeToken(proof));
   }
+  const verb = method ?? (body === undefined ? 'GET' : 'POST');
+  if (publicDesktop) {
+    const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload && new Uint8Array(payload);
+    const result = await callDesktop<ArrayBuffer>({ kind: 'request', call: { path, method: verb,
+      body: bytes && sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL), token: headers.get('Authorization')?.slice(7),
+      writeKey: headers.get('X-Vault-Write-Key') ?? undefined, proof: headers.get('X-Vault-Write-Proof') ?? undefined,
+    } });
+    const status = new DataView(result).getUint16(0);
+    return new Response([204, 205, 304].includes(status) ? null : result.slice(2), { status });
+  }
   return fetch(apiUrl(path), {
-    method: method ?? (body === undefined ? 'GET' : 'POST'), headers,
+    method: verb, headers,
     body: payload,
     credentials: separateClient() || (token && path !== 'sessions') ? 'omit' : 'same-origin', cache: 'no-store', redirect: 'error',
     signal: AbortSignal.timeout(12_000),
@@ -65,6 +78,17 @@ export async function withVaultSession<T>(e: MasterEnvelope, account: Uint8Array
   if (!navigator.locks) throw Error('This browser cannot coordinate vault sync safely');
   return navigator.locks.request('voltura-vault-sync', async () => {
     const vaultId = e.context.vaultId;
+    if (publicDesktop) {
+      const local = await db();
+      const [saved, bound, active] = await Promise.all([
+        callDesktop<string | null>({ kind: 'profile' }),
+        local.get('sync', 'desktop-server'),
+        local.get('config', 'master'),
+      ]);
+      if (!saved || (active && (saved !== bound || active.context.vaultId !== vaultId))) {
+        throw Error('This local vault is bound to a different connection. Your data has been retained.');
+      }
+    }
     const bearerSession = separateClient();
     await sodium.ready;
     const pair = sodium.crypto_sign_keypair();

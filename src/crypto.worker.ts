@@ -4,6 +4,7 @@ import { CHUNK_BYTES, chunkKey, context, MAX_FOLDER_NAME_LENGTH, type HelloCrede
 import { currentRevisions, db, publishAttachment, removeUnpublishedChunks, saveAttachmentChunks, saveImport, saveInitial, saveRevision } from './storage';
 import { chunkAad, readAttachment, startAttachment } from './attachments';
 import { calibrate, type Calibration } from './calibration';
+import { callDesktop, publicDesktop, setDesktopChannel } from './desktop-channel';
 import { initializeRemote, remoteConfig, separateClient, syncEnabled, synchronize, withVaultSession } from './sync';
 import { attachmentDetails, deleteVaultFile, downloadChunk, eraseLocalFile, fileManifest, type VaultRequest } from './file-sync';
 import { decodeImported, encodeImported, parseBitwarden, type ImportedItem } from './bitwarden';
@@ -162,17 +163,28 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
       if (root) return { notes: result, lastInteraction: sessionExpires - sessionTimeout, ...sessionView };
       return;
     }
+    case 'check-pending-pairing': {
+      unlocked();
+      const d = await db();
+      const [pending, attachments] = await Promise.all([d.count('pending'), d.getAll('attachments')]);
+      if (pending || attachments.some(file => file.remote !== true)) {
+        throw Error('This device has unsynced changes. Sync them before changing servers.');
+      }
+      return true;
+    }
     case 'status': {
       const d = await db(), local = await d.get('config', 'master');
+      const server = publicDesktop ? await callDesktop<string | null>({ kind: 'profile' }).catch(() => null) : null;
       let remote: 'local' | 'new' | 'configured' | 'unavailable' = local?.account ? 'configured' : 'local';
       let remoteEnvelope: MasterEnvelope | undefined;
-      if (syncEnabled() && !local) {
+      if (syncEnabled() && !local && (!publicDesktop || server)) {
         try {
           remoteEnvelope = await remoteConfig();
           remote = remoteEnvelope ? 'configured' : 'new';
         }
         catch { remote = 'unavailable'; }
       }
+      if (publicDesktop && !local && !server) remote = 'unavailable';
       const files = root ? await d.getAll('attachments') : [];
       const pending = root ? await d.count('pending') : 0;
       const rejectedServerData = !!(root && local &&
@@ -184,7 +196,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
       const attachments = key ? files.map(file => ({ ...file, ...attachmentDetails(file, key) })) : [];
       const requiresRecoveryFile = Boolean(remoteEnvelope?.recoveryDevice ||
         (local?.recoveryDevice && !await d.get('sync', deviceKeyId(local))));
-      return { remote, requiresRecoveryFile,
+      return { remote, requiresRecoveryFile, server,
         importAvailable: canImport(), exists: !!local || remote === 'configured', pending: key ? pending : 0, attachments,
         rejectedServerData: !!key && rejectedServerData,
         hello: savedHello ? { id: savedHello.id, input: savedHello.input } : undefined,
@@ -276,6 +288,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
     case 'create': {
       if (root) throw Error('Lock your vault before creating another one.');
       const password = String(payload.password);
+      if (publicDesktop && await (await db()).get('config', 'master')) throw Error('This device already has a vault.');
       validateNewMasterPassword(password);
       if (!calibration?.targetReached) throw Error('Calibration has not reached the target on this device. Run calibration again.');
       const kdf: Kdf = calibration.kdf;
@@ -298,9 +311,10 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
             try { await initializeRemote(result.envelope, token, recovery, String(payload.setup ?? '')); }
             finally { wipe(recovery); }
           }
+          const server = publicDesktop ? await callDesktop<string>({ kind: 'commit', vaultId: result.envelope.context.vaultId }) : undefined;
           await saveInitial(result.envelope, {
             id: deviceKeyId(result.envelope), key: sodium.to_base64(deviceKey, keyEncoding()),
-          });
+          }, server);
           wipe(pendingRecoveryDigest); pendingRecoveryDigest = undefined;
           root = result.root; envelope = result.envelope;
           account = token?.slice();
@@ -311,7 +325,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
     }
     case 'unlock': {
       const d = await db(), local = await d.get('config', 'master');
-      const replacingLegacyVault = Boolean(payload.recoveryFile && local && !local.recoveryDevice && separateClient());
+      const replacingLegacyVault = Boolean(!publicDesktop && payload.recoveryFile && local && !local.recoveryDevice && separateClient());
       const e = !replacingLegacyVault && local ? local : syncEnabled() ? await remoteConfig() : undefined;
       if (!e) throw Error('Connect to the protected vault before recovering.');
       if (payload.recoveryFile && !e.recoveryDevice) throw Error('The connected vault does not support a recovery key.');
@@ -329,6 +343,12 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         if (replacingLegacyVault) {
           if (!account) throw Error('The protected vault is missing its account credential.');
           await withVaultSession(e, account, async () => undefined);
+        }
+        let server: string | undefined;
+        if (publicDesktop && !local) {
+          if (!recoveryKey || !account) throw Error('Pair with the master password and recovery file.');
+          await withVaultSession(e, account, async () => undefined);
+          server = await callDesktop<string>({ kind: 'commit', vaultId: e.context.vaultId });
         }
         if (!local || recoveryKey) {
           const names = ['config', 'sync', 'revisions', 'heads', 'pending', 'attachments', 'chunks'] as const;
@@ -351,14 +371,16 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
             await Promise.all(names.map(name => tx.objectStore(name).clear()));
           }
           if (!saved || replacingLegacyVault) await tx.objectStore('config').put(e, 'master');
+          if (server) await tx.objectStore('sync').put(server, 'desktop-server');
           if (deviceKey) await tx.objectStore('sync').put(sodium.to_base64(deviceKey, keyEncoding()), deviceKeyId(e));
           await tx.done;
         }
         envelope = e;
         if (e.context.epoch > 1) await retireGeneratorHistory(e.context).catch(() => undefined);
         startSession(payload.idleMs); return await notes();
-      } catch {
+      } catch (error) {
         clearSession();
+        if (publicDesktop && !local && error instanceof Error && error.message.includes('different vault')) throw error;
         if (unsyncedLegacyData) throw Error('This device has unsynced changes in a different vault. Use a separate browser profile to recover without losing them.');
         throw Error(e.recoveryDevice ? 'Could not unlock. Check the password and, if requested, the recovery key file.'
           : 'Could not unlock. Check your master password and recovery file, if used.');
@@ -709,5 +731,11 @@ if ('onconnect' in self) {
     port.onmessage = request => receive(request, result => port.postMessage(result));
   };
 } else {
-  self.onmessage = event => receive(event, result => self.postMessage(result));
+  self.onmessage = event => {
+    if (event.data?.type === 'desktop-channel') {
+      if (event.ports[0]) setDesktopChannel(event.ports[0]);
+      return;
+    }
+    receive(event, result => self.postMessage(result));
+  };
 }

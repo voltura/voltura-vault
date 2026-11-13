@@ -1,3 +1,5 @@
+import { publicDesktop } from './desktop-channel';
+import { desktopOperation } from './desktop-transport';
 import cryptoWorkerUrl from './crypto.worker?worker&url';
 
 const TAB_SESSION = 'voltura-tab-session';
@@ -49,7 +51,20 @@ export class CryptoClient {
       } catch { this.tabSession = undefined; this.sharedAvailable = false; }
     }
     const worker = new Worker(new URL('./crypto.worker.ts', import.meta.url), { type: 'module' });
-    return { port: worker, disconnect: () => worker.terminate(),
+    const bridge = publicDesktop ? new MessageChannel() : undefined;
+    if (bridge) {
+      bridge.port1.onmessage = async ({ data }) => {
+        try {
+          const value = await desktopOperation(data);
+          bridge.port1.postMessage({ id: data.id, value }, value instanceof ArrayBuffer ? [value] : []);
+        } catch (error) {
+          bridge.port1.postMessage({ id: data.id, error: typeof error === 'string' ? error :
+            error instanceof Error ? error.message : 'Vault connection failed.' });
+        }
+      };
+      worker.postMessage({ type: 'desktop-channel' }, [bridge.port2]);
+    }
+    return { port: worker, disconnect: () => { bridge?.port1.close(); worker.terminate(); },
       onError: (fn: (event: Event) => void) => { worker.onerror = fn; } };
   }
   call<T>(type: string, payload: Record<string, unknown> = {}, steps?: (done: number, total: number) => void): Promise<T> {

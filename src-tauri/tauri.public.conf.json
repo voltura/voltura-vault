@@ -1,0 +1,35 @@
+{
+  "productName": "Voltura Vault Public Alpha",
+  "mainBinaryName": "voltura-vault-public-alpha",
+  "version": "0.1.0-alpha.2",
+  "identifier": "se.voltura.vault.public",
+  "build": {
+    "features": ["public-desktop"],
+    "beforeBuildCommand": "node scripts/build-public-desktop.mjs"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Voltura Vault",
+        "url": "index.html",
+        "useHttpsScheme": true,
+        "create": false,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 400,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: https://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "shortDescription": "Self-hosted vault desktop prerelease",
+    "publisher": "Voltura AB",
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "macOS": { "signingIdentity": "-" },
+    "windows": { "nsis": { "installerHooks": null } }
+  }
+}

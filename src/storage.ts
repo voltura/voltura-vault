@@ -27,13 +27,14 @@ function sameRevision(existing: Revision, r: Revision) {
     && bytesEqual(existing.key.nonce, r.key.nonce) && bytesEqual(existing.key.ciphertext, r.key.ciphertext)
     && bytesEqual(existing.body.nonce, r.body.nonce) && bytesEqual(existing.body.ciphertext, r.body.ciphertext);
 }
-export async function saveInitial(envelope: MasterEnvelope, device?: { id: string; key: string }) {
+export async function saveInitial(envelope: MasterEnvelope, device?: { id: string; key: string }, server?: string) {
   const d = await db();
   const tx = d.transaction(['config', 'sync'], 'readwrite');
   void tx.done.catch(() => undefined); // Observe early aborts even when an individual request rejects first.
   if (await tx.objectStore('config').get('master')) { tx.abort(); throw Error('A vault already exists on this device'); }
   await tx.objectStore('config').add(envelope, 'master');
   if (device) await tx.objectStore('sync').put(device.key, device.id);
+  if (server) await tx.objectStore('sync').put(server, 'desktop-server');
   await tx.done;
 }
 export async function saveRevision(r: Revision): Promise<'saved' | 'conflict'> {
@@ -79,7 +80,9 @@ export async function commitDeviceRotation(old: MasterEnvelope, replacement: Mas
     })) {
     tx.abort(); throw Error('Local edits changed in another window. Retry device recovery.');
   }
+  const server = await tx.objectStore('sync').get('desktop-server');
   await Promise.all(names.map(name => tx.objectStore(name).clear()));
+  if (server) await tx.objectStore('sync').put(server, 'desktop-server');
   await tx.objectStore('config').add(replacement, 'master');
   await tx.objectStore('sync').add(device.key, device.id);
   const parents = new Set(recovered.flatMap(revision => revision.parents));

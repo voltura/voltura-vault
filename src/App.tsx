@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { publicDesktop } from './desktop-channel';
+import { connectDesktop } from './desktop-transport';
+import { ORIGIN, WEB_ORIGIN } from './sync';
 import { CryptoClient } from './worker-client';
 import { IdleClock } from './idle';
 import { canUseHello, enrollHello, evaluateHello } from './hello';
@@ -18,7 +21,7 @@ type ImportPreview = ImportSummary & { newItems: number; newFolders: number; dup
 type SourceVersion = { id: string; size: number; created: number };
 type Status = {
   exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable';
-  rejectedServerData?: boolean;
+  rejectedServerData?: boolean; server?: string | null;
   hello?: HelloCredential; helloOnly?: boolean; requiresRecoveryFile?: boolean; importAvailable?: boolean;
 };
 export function App() {
@@ -72,7 +75,7 @@ export function App() {
   const dirty = unlocked && (!!newItem || (!!currentItem && (draft !== currentItem.text ||
     JSON.stringify(editor) !== JSON.stringify(itemDraft(currentItem.item, currentItem.text)))));
   const helloAvailable = canUseHello();
-  const independentWeb = window.location.origin === 'https://vault-ui.test';
+  const independentWeb = window.location.origin === WEB_ORIGIN;
   const canSync = status.remote === 'configured' && !status.helloOnly;
   const refresh = async () => {
     const current = generation.current;
@@ -157,7 +160,7 @@ export function App() {
         }
       }
       const currentStatus = await refresh();
-      if (active && currentStatus.remote === 'unavailable' && !independentWeb) setError('Vault server unavailable. Reload when connected.');
+      if (active && currentStatus.remote === 'unavailable' && !independentWeb && !publicDesktop) setError('Vault server unavailable. Reload when connected.');
     };
     start().catch(() => { if (active) setError('Local encrypted storage is unavailable.'); });
     return () => { active = false; client.current?.disconnect(); };
@@ -443,7 +446,7 @@ export function App() {
     } else if (keep) { await refresh(); if (current === generation.current) setNotice('Encrypted file available offline.'); }
     else setNotice(`${result.verifiedBytes.toLocaleString()} bytes verified.`);
   }
-  return <VaultView model={{ page, unlocked, hidden, busy, notice, error, status, syncPaused, rotationNeeded, notes, selected, newItem, draft, editor, dirty, password, setup, recoveryFile, recoveryDownloaded, calibration, online, mobileDetail, theme, palette, timeout, clipboardSeconds, privateClipboard: windowsClipboard(), helloAvailable, helloSetup, browserHelloPending: !!browserHelloToken, importFile, importPassword, importPreview, importProgress, sourceVersions, recoveryVersions, sourcePassword, sourceRecovery: !!sourceRecovery, webUpdate, independentWeb }} actions={{
+  return <VaultView model={{ page, unlocked, hidden, busy, notice, error, status, syncPaused, rotationNeeded, notes, selected, newItem, draft, editor, dirty, password, setup, recoveryFile, recoveryDownloaded, calibration, online, mobileDetail, theme, palette, timeout, clipboardSeconds, privateClipboard: windowsClipboard(), helloAvailable, helloSetup, browserHelloPending: !!browserHelloToken, importFile, importPassword, importPreview, importProgress, sourceVersions, recoveryVersions, sourcePassword, sourceRecovery: !!sourceRecovery, webUpdate, independentWeb, publicDesktop }} actions={{
     navigate: changePage,
     lock: () => lock(dirty ? 'Locked. Unsaved changes discarded; your last saved version is retained.' : undefined),
     unlock: () => void run(doUnlock), setPassword, setSetup, setRecoveryFile,
@@ -462,11 +465,25 @@ export function App() {
       setRecoveryDownloaded(true);
     }),
     calibrate: () => void run(calibrateDevice),
+    checkPairing: () => void run(async () => {
+      if (!publicDesktop || dirty) throw Error('Save or discard the open edit before checking.');
+      await client.current!.call('check-pending-pairing');
+      setNotice('No pending changes. Pair the other server in a fresh OS profile. This vault stays here.');
+    }),
+    connectDesktop: (url, certificate) => void run(async () => {
+      try {
+        await connectDesktop(url, certificate);
+      } catch (error) {
+        throw Error(typeof error === 'string' ? error : error instanceof Error ? error.message : 'Vault connection failed.');
+      }
+      setPassword(''); setSetup(''); setRecoveryFile(undefined); setRecoveryDownloaded(false);
+      if ((await refresh()).remote === 'unavailable') throw Error('The server did not provide a usable Vault configuration.');
+    }),
     connect: () => void run(async () => {
       if (!independentWeb) return;
       const message = 'Could not reach the vault. Check WireGuard and allow local network access for this site if your browser asks.';
       // Request access from the page: a background worker cannot show Chrome’s permission prompt.
-      const response = await fetch('https://vault-api.test/api/v1/config', {
+      const response = await fetch(ORIGIN + '/api/v1/config', {
         credentials: 'omit', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(20_000),
       }).catch(() => { throw Error(message); });
       if ((!response.ok && response.status !== 404) || (await refresh()).remote === 'unavailable') throw Error(message);

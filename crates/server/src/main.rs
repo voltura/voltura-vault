@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 use voltura_server_auth::SecretToken;
-use voltura_vault_server::{AppState, initialize, now, rotation, router_with_unix_desktop};
+use voltura_vault_server::{AppState, Boundary, initialize, now, renew_expired_setup, rotation, router_configured, router_with_unix_desktop};
 
 mod restore;
 
@@ -66,24 +66,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {}
     }
-    if args.len() != 3 || !matches!(args[1].as_str(), "init" | "run" | "prepare-restore") {
-        return Err("Usage: voltura-vault-server init|run|prepare-restore|rotation-point DATA_DIRECTORY, or activate-rotation DATA_DIRECTORY REPLACEMENT_DATABASE ROTATION_POINT_FILE".into());
+    if args.len() != 3 || !matches!(args[1].as_str(), "init" | "renew-setup" | "run" | "prepare-restore") {
+        return Err("Usage: voltura-vault-server init|renew-setup|run|prepare-restore|rotation-point DATA_DIRECTORY, or activate-rotation DATA_DIRECTORY REPLACEMENT_DATABASE ROTATION_POINT_FILE".into());
     }
     let directory = PathBuf::from(&args[2]);
     if args[1] == "prepare-restore" {
         return restore::prepare(&directory, minimum_key_epoch()?);
     }
-    if args[1] == "init" {
+    if args[1] == "init" || args[1] == "renew-setup" {
+        let initial = args[1] == "init";
+        if initial {
         fs::create_dir(&directory)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         }
+        }
+        let database_lock = maintenance_lock(&directory)?;
+        database_lock.try_lock().map_err(|_| "Stop the Vault API before changing the setup code")?;
         let token =
             SecretToken::generate().map_err(|_| "Operating-system randomness unavailable")?;
-        let mut db = rusqlite::Connection::open(directory.join("vault.sqlite3"))?;
-        initialize(&mut db, &token, now())?;
+        let mut flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE;
+        if initial { flags |= rusqlite::OpenFlags::SQLITE_OPEN_CREATE; }
+        let mut db = rusqlite::Connection::open_with_flags(directory.join("vault.sqlite3"), flags)?;
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -91,9 +97,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(directory.join("setup-token"))?;
-        file.write_all(token.encode().as_bytes())?;
-        file.sync_all()?;
+        let pending = directory.join("setup-token.next");
+        let mut file = options.open(&pending)?;
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            file.write_all(token.encode().as_bytes())?;
+            file.sync_all()?;
+            if initial { initialize(&mut db, &token, now())?; }
+            else { renew_expired_setup(&mut db, &token, now())?; }
+            drop(file);
+            fs::rename(&pending, directory.join("setup-token"))?;
+            Ok(())
+        })();
+        if result.is_err() && pending.exists() { let _ = fs::remove_file(&pending); }
+        result?;
         println!(
             "Vault server initialized. The setup token expires after 15 minutes. Keep it private."
         );
@@ -106,7 +122,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     database_lock.try_lock_shared().map_err(|_| "Vault key rotation is in progress")?;
     let floor = std::env::var_os("VOLTURA_KEY_EPOCH_FLOOR")
         .map(|path| rotation::read_epoch_floor(PathBuf::from(path).as_path())).transpose()?;
-    let app = router_with_unix_desktop(AppState::open_with_epoch(&database, minimum_epoch, floor)?, unix_desktop);
+    let state = AppState::open_with_epoch(&database, minimum_epoch, floor)?;
+    let browser = std::env::var("VOLTURA_BROWSER_ORIGIN").ok().filter(|s| !s.is_empty());
+    let app = match std::env::var("VOLTURA_API_HOST") {
+        Ok(host) => router_configured(state, Boundary::configured(&host, browser.as_deref())?),
+        Err(std::env::VarError::NotPresent) if browser.is_none() => router_with_unix_desktop(state, unix_desktop),
+        Err(_) => return Err("Configure VOLTURA_API_HOST before enabling a browser origin".into()),
+    };
     let port = std::env::var("VOLTURA_PORT").map_or(Ok(8787), |port| port.parse::<u16>())?;
     let address = std::env::var("VOLTURA_LISTEN")
         .as_deref()

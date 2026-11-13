@@ -1,7 +1,8 @@
 import type { HelloCredential } from './format';
 
 const localDeviceHint = { hints: ['client-device'] };
-const RP = 'vault-ui.test';
+const browserOrigin = import.meta.env.VITE_VAULT_WEB_ORIGIN ?? 'https://vault-ui.test';
+const RP = new URL(browserOrigin).hostname;
 
 // A short label lets the owner distinguish browser enrollments in the Windows picker.
 export function browserHelloLabel(input: Uint8Array) {
@@ -15,7 +16,7 @@ const PROVIDERS = new Set([
 ]);
 const native = () => location.origin === 'https://tauri.localhost' && '__TAURI_INTERNALS__' in window;
 export const canUseHello = () => native() || (
-  location.origin === `https://${RP}` && /^Win/.test(navigator.platform) && typeof PublicKeyCredential !== 'undefined'
+  location.origin === browserOrigin && /^Win/.test(navigator.platform) && typeof PublicKeyCredential !== 'undefined'
 );
 
 async function checkAuthenticatorData(data: Uint8Array, enrollment = false) {

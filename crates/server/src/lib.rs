@@ -44,6 +44,7 @@ pub struct AppState {
     jobs: Arc<Semaphore>,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     failures: Arc<Mutex<Failures>>,
+    boundary: Boundary,
 }
 
 #[derive(Default)]
@@ -104,6 +105,7 @@ impl AppState {
             jobs: Arc::new(Semaphore::new(8)),
             clock: Arc::new(now),
             failures: Arc::new(Mutex::new(Failures::default())),
+            boundary: Boundary::example(),
         })
     }
 
@@ -209,13 +211,50 @@ pub fn initialize(
     tx.commit()
 }
 
-pub fn router(state: AppState) -> Router {
-    router_with_unix_desktop(state, false)
+#[derive(Clone)]
+pub struct Boundary {
+    host: String,
+    same_origin: String,
+    browser_origin: Option<String>,
+    legacy_desktop: bool,
+    unix_desktop: bool,
 }
 
-pub fn router_with_unix_desktop(state: AppState, enable_unix_desktop: bool) -> Router {
+impl Boundary {
+    fn example() -> Self {
+        Self { host: HOST.into(), same_origin: ORIGIN.into(), browser_origin: Some(SEPARATE_WEB_ORIGIN.into()),
+            legacy_desktop: true, unix_desktop: false }
+    }
+
+    pub fn configured(host: &str, browser: Option<&str>) -> Result<Self, &'static str> {
+        fn parse(value: &str) -> Result<url::Url, &'static str> {
+            let error = "Use a canonical HTTPS hostname with an optional port";
+            let parsed = url::Url::parse(value).map_err(|_| error)?;
+            let Some(url::Host::Domain(name)) = parsed.host() else { return Err(error); };
+            if name.len() > 253 || name.split('.').any(|label| label.is_empty() || label.len() > 63
+                || label.starts_with('-') || label.ends_with('-')
+                || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+                || parsed.scheme() != "https" || parsed.port() == Some(0)
+                || value != parsed.origin().ascii_serialization() {
+                return Err(error);
+            }
+            Ok(parsed)
+        }
+        let api = parse(&format!("https://{host}"))?;
+        let browser_origin = browser.map(parse).transpose()?.map(|value| value.origin().ascii_serialization());
+        if browser_origin.as_deref() == Some(api.origin().ascii_serialization().as_str()) {
+            return Err("The browser client must use a separate HTTPS origin");
+        }
+        Ok(Self { host: host.into(), same_origin: api.origin().ascii_serialization(), browser_origin,
+            legacy_desktop: false, unix_desktop: false })
+    }
+}
+
+pub fn router_configured(mut state: AppState, boundary: Boundary) -> Router {
+    state.boundary = boundary.clone();
     Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .route("/api/v1/discovery", get(discover))
         .route("/api/v1/bootstrap", post(bootstrap))
         .route("/api/v1/config", get(configuration))
         .route("/api/v1/sessions", post(login))
@@ -225,9 +264,38 @@ pub fn router_with_unix_desktop(state: AppState, enable_unix_desktop: bool) -> R
         .merge(files::routes(state.clone()))
         .merge(source_archives::routes())
         .layer(middleware::from_fn(move |request, next| {
-            boundary(request, next, enable_unix_desktop)
+            boundary_request(request, next, boundary.clone())
         }))
         .with_state(state)
+}
+
+async fn discover(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    state.database(|db| {
+        let vault: Option<String> = db.query_row("SELECT vault FROM owner WHERE singleton=1",
+            [], |row| row.get(0)).optional()?;
+        Ok(Json(match vault {
+            Some(id) => json!({"protocolVersion":1,"setupRequired":false,"vaultId":id}),
+            None => json!({"protocolVersion":1,"setupRequired":true}),
+        }))
+    }).await
+}
+
+pub fn renew_expired_setup(db: &mut Connection, token: &SecretToken, issued: u64) -> rusqlite::Result<()> {
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let verifier = token.verifier(BOOTSTRAP_VAULT, Purpose::Bootstrap);
+    if tx.execute("UPDATE bootstrap SET digest=?1,issued=?2,expires=?3 WHERE singleton=1 AND expires<=?2
+        AND NOT EXISTS (SELECT 1 FROM owner)", params![verifier.digest().as_slice(), issued, issued.saturating_add(900)])? != 1 {
+        return Err(rusqlite::Error::InvalidParameterName("Setup already finished or the current code has not expired".into()));
+    }
+    tx.commit()
+}
+
+pub fn router(state: AppState) -> Router {
+    router_with_unix_desktop(state, false)
+}
+
+pub fn router_with_unix_desktop(state: AppState, enable_unix_desktop: bool) -> Router {
+    router_configured(state, Boundary { unix_desktop: enable_unix_desktop, ..Boundary::example() })
 }
 
 #[derive(Debug)]
@@ -260,25 +328,25 @@ impl IntoResponse for ApiError {
     }
 }
 
-async fn boundary(request: Request, next: Next, enable_unix_desktop: bool) -> Response {
+async fn boundary_request(request: Request, next: Next, boundary: Boundary) -> Response {
     let origin = request.headers().get(header::ORIGIN);
     let separate_client = origin
         .filter(|value| {
-            *value == DESKTOP_ORIGIN
-                || *value == SEPARATE_WEB_ORIGIN
-                || (enable_unix_desktop && *value == UNIX_DESKTOP_ORIGIN)
+            (boundary.legacy_desktop && *value == DESKTOP_ORIGIN)
+                || boundary.browser_origin.as_ref().is_some_and(|allowed| *value == allowed.as_str())
+                || (boundary.unix_desktop && *value == UNIX_DESKTOP_ORIGIN)
         })
         .cloned();
-    let allowed = request.uri().path() == "/health"
+    let allowed = (request.uri().path() == "/health" && boundary.legacy_desktop)
         || (request
             .headers()
             .get(header::HOST)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|host| host.eq_ignore_ascii_case(HOST))
+            .is_some_and(|host| host.eq_ignore_ascii_case(&boundary.host))
             && request.headers().get_all(header::HOST).iter().count() == 1
             && request.headers().get_all(header::ORIGIN).iter().count() <= 1
             && request.uri().query().is_none()
-            && (separate_client.is_some() || origin.is_none_or(|v| v == ORIGIN))
+            && (separate_client.is_some() || origin.is_none_or(|v| boundary.legacy_desktop && v == boundary.same_origin.as_str()))
             && (separate_client.is_none() || !request.headers().contains_key(header::COOKIE)));
     let mut response = if allowed {
         if separate_client.is_some()
@@ -487,7 +555,8 @@ async fn login(
 ) -> Result<Response, ApiError> {
     let time = (state.clock)();
     let Json(body) = body.map_err(|error| ApiError(error.status(), "invalid_request"))?;
-    if body.client == Client::Browser && headers.get(header::ORIGIN).is_none_or(|v| v != ORIGIN) {
+    if body.client == Client::Browser && (!state.boundary.legacy_desktop
+        || headers.get(header::ORIGIN).is_none_or(|v| v != ORIGIN)) {
         return Err(ApiError::forbidden());
     }
     let presented = zeroize::Zeroizing::new(bearer(&headers)?);

@@ -1,19 +1,36 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 mod clipboard;
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 mod hello_unlock;
+#[cfg(feature = "public-desktop")]
+mod transport;
 
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(any(feature = "vpn-client", feature = "public-desktop"))]
+fn bundled_url(url: &tauri::Url) -> bool {
+    let (scheme, host, port) = if cfg!(windows) {
+        ("https", "tauri.localhost", Some(443))
+    } else {
+        ("tauri", "localhost", None)
+    };
+    url.scheme() == scheme && url.host_str() == Some(host) && url.port_or_known_default() == port
+        && url.username().is_empty() && url.password().is_none()
+}
+
+#[cfg(any(feature = "public-desktop", all(windows, feature = "vpn-client")))]
+fn trusted_window(window: &tauri::WebviewWindow) -> bool {
+    window.label() == "main" && window.url().is_ok_and(|url| bundled_url(&url))
+}
+
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 fn installed_window(window: &tauri::WebviewWindow) -> Result<isize, String> {
-    let origin = window.url().ok().map(|url| url.origin().ascii_serialization());
-    if window.label() != "main" || origin.as_deref() != Some("https://tauri.localhost") {
+    if !trusted_window(window) {
         return Err("This action requires the installed Vault.".into());
     }
     Ok(window.hwnd().map_err(|_| "No application window")?.0 as isize)
 }
 
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 #[tauri::command]
 async fn hello_enroll(window: tauri::WebviewWindow, input: Vec<u8>) -> Result<String, String> {
     let handle = installed_window(&window)?;
@@ -21,7 +38,7 @@ async fn hello_enroll(window: tauri::WebviewWindow, input: Vec<u8>) -> Result<St
         .await.map_err(|_| "Windows Hello could not start.".to_string())?
 }
 
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 #[tauri::command]
 async fn hello_evaluate(window: tauri::WebviewWindow, credential_id: String, input: Vec<u8>) -> Result<tauri::ipc::Response, String> {
     let handle = installed_window(&window)?;
@@ -30,7 +47,7 @@ async fn hello_evaluate(window: tauri::WebviewWindow, credential_id: String, inp
     Ok(tauri::ipc::Response::new(secret.to_vec()))
 }
 
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 #[tauri::command]
 async fn copy_to_windows_clipboard(window: tauri::WebviewWindow, value: String, seconds: u64) -> Result<(), String> {
     use tauri::Manager;
@@ -42,7 +59,7 @@ async fn copy_to_windows_clipboard(window: tauri::WebviewWindow, value: String, 
     .map_err(|_| "Could not copy to the Windows clipboard.".to_string())?
 }
 
-#[cfg(all(windows, feature = "vpn-client"))]
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 fn setup_tray(app: &tauri::App, window: tauri::WebviewWindow) -> tauri::Result<()> {
     use tauri::{
         menu::{Menu, MenuItem},
@@ -93,33 +110,39 @@ fn setup_tray(app: &tauri::App, window: tauri::WebviewWindow) -> tauri::Result<(
     Ok(())
 }
 
-#[cfg(not(feature = "vpn-client"))]
+#[cfg(not(any(feature = "vpn-client", feature = "public-desktop")))]
 fn main() {
     tauri::Builder::default()
         .run(tauri::generate_context!())
         .expect("Vault application could not start");
 }
 
-#[cfg(feature = "vpn-client")]
+#[cfg(any(feature = "vpn-client", feature = "public-desktop"))]
 fn main() {
     let builder = tauri::Builder::default();
     #[cfg(windows)]
-    let builder = builder
-        .manage(clipboard::Clipboard::default())
-        .invoke_handler(tauri::generate_handler![hello_enroll, hello_evaluate, copy_to_windows_clipboard]);
+    let builder = builder.manage(clipboard::Clipboard::default());
+    #[cfg(all(windows, not(feature = "public-desktop")))]
+    let builder = builder.invoke_handler(tauri::generate_handler![hello_enroll, hello_evaluate, copy_to_windows_clipboard]);
+    #[cfg(feature = "public-desktop")]
+    let builder = {
+        use transport::{vault_profile, vault_connect, vault_request, vault_commit};
+        let builder = builder.manage(transport::Transport::default());
+        #[cfg(windows)]
+        let builder = builder.invoke_handler(tauri::generate_handler![
+            vault_profile, vault_connect, vault_request, vault_commit,
+            hello_enroll, hello_evaluate, copy_to_windows_clipboard]);
+        #[cfg(not(windows))]
+        let builder = builder.invoke_handler(tauri::generate_handler![
+            vault_profile, vault_connect, vault_request, vault_commit]);
+        builder
+    };
     builder
         .setup(|app| {
             let window = &app.config().app.windows[0];
             let _window = tauri::WebviewWindowBuilder::from_config(app.handle(), window)?
                 .on_navigation(|url| {
-                    let bundled_scheme = if cfg!(windows) { "https" } else { "tauri" };
-                    let bundled_host = if cfg!(windows) { "tauri.localhost" } else { "localhost" };
-                    let bundled_port = if cfg!(windows) { Some(443) } else { None };
-                    (url.scheme() == bundled_scheme
-                        && url.host_str() == Some(bundled_host)
-                        && url.port_or_known_default() == bundled_port
-                        && url.username().is_empty()
-                        && url.password().is_none())
+                    bundled_url(url)
                         || url.as_str().starts_with(if cfg!(windows) {
                             "blob:https://tauri.localhost/"
                         } else {

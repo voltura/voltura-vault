@@ -1073,3 +1073,45 @@ async fn malformed_or_oversized_setup_does_not_consume_the_token() {
     );
     f.setup().await;
 }
+
+#[tokio::test]
+async fn configured_discovery_and_origin_boundary() {
+    use voltura_vault_server::{Boundary, router_configured};
+    let f = Fixture::new();
+    let boundary = Boundary::configured("vault.example.test:8443", Some("https://ui.example.test")).unwrap();
+    let app = router_configured(AppState::open(&f.directory.join("vault.sqlite3")).unwrap(), boundary);
+    let query = |host: &str, origin: Option<&str>| {
+        let mut req = Request::builder().uri("/api/v1/discovery").header("host", host);
+        if let Some(origin) = origin { req = req.header("origin", origin); }
+        req.body(Body::empty()).unwrap()
+    };
+    let host = "vault.example.test:8443";
+    let call = |host, origin| app.clone().oneshot(query(host, origin));
+    assert_eq!(call("vault.example.test", None).await.unwrap().status(), 403);
+    assert_eq!(call(host, Some("https://tauri.localhost")).await.unwrap().status(), 403);
+    let first = call(host, Some("https://ui.example.test")).await.unwrap();
+    assert_eq!(first.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "https://ui.example.test");
+    let read = |response: Response| async move {
+        serde_json::from_slice::<Value>(&to_bytes(response.into_body(), 2048).await.unwrap()).unwrap()
+    };
+    assert_eq!(read(first).await, json!({"protocolVersion":1,"setupRequired":true}));
+    f.setup().await;
+    let second = call(host, None).await.unwrap();
+    assert_eq!(read(second).await, json!({"protocolVersion":1,"setupRequired":false,"vaultId":VAULT}));
+    assert!(Boundary::configured("vault.example.test/path", None).is_err());
+    assert!(Boundary::configured(host, Some("https://ui.example.test/")).is_err());
+}
+
+#[test]
+fn renew_setup_only_replaces_expired_code_on_empty_vault() {
+    use voltura_vault_server::renew_expired_setup;
+    let mut db = Connection::open_in_memory().unwrap();
+    let first = SecretToken::generate().unwrap();
+    let next = SecretToken::generate().unwrap();
+    initialize(&mut db, &first, 100).unwrap();
+    assert!(renew_expired_setup(&mut db, &next, 999).is_err());
+    renew_expired_setup(&mut db, &next, 1000).unwrap();
+    assert!(renew_expired_setup(&mut db, &first, 1001).is_err());
+    db.execute("DELETE FROM bootstrap", []).unwrap();
+    assert!(renew_expired_setup(&mut db, &first, 2000).is_err());
+}

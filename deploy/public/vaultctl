@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+
+[[ $# -ge 2 ]] || fail 'Usage: vaultctl CONFIG init|renew-setup|up|health|backup|restore'
+config=$(realpath -e -- "$1")
+shift
+kit=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+compose=(docker compose --env-file "$config" -f "$kit/compose.yaml")
+# Read the same resolved values Docker will use. Never source the operator's file.
+settings=$("${compose[@]}" config --format json)
+mapfile -t values < <(python3 -c '
+import ipaddress, json, sys
+c = json.load(sys.stdin)["services"]
+a, p = c["api"], c["proxy"]
+assert len(p["ports"]) == 1
+ip = ipaddress.IPv4Address(p["ports"][0]["host_ip"])
+assert ip.is_loopback or any(ip in ipaddress.IPv4Network(n) for n in ("10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"))
+host = a["environment"]["VOLTURA_API_HOST"]
+port = int(p["ports"][0]["published"])
+assert port == (int(host.split(":")[1]) if ":" in host else 443)
+print(a["volumes"][0]["source"])
+print(host)
+print(ip)
+print(port)
+' <<< "$settings")
+[[ ${#values[@]} == 4 ]] || fail 'Use a private IPv4 bind address and match the API hostname and HTTPS port.'
+root=$(realpath -e -- "${values[0]}")
+[[ $root != / && -d $root && ! -L ${values[0]} ]] || fail 'Use a dedicated state directory.'
+data="$root/data"
+[[ ! -L $data ]] || fail 'The data directory must not be a symbolic link.'
+exec 9>"$root/.vaultctl.lock"
+flock -x 9
+stop_api() {
+  local running
+  running=$("${compose[@]}" ps --status running --quiet api)
+  if [[ -n $running ]]; then
+    trap '"${compose[@]}" start api >/dev/null || { printf "%s\n" "Could not restart the Vault API." >&2; exit 1; }' EXIT
+    "${compose[@]}" stop --timeout 30 api
+  fi
+}
+
+case "$1" in
+  init)
+    [[ $# == 1 && ! -e $data ]] || fail 'A data directory already exists.'
+    "${compose[@]}" build api
+    "${compose[@]}" run --rm --no-deps api init /var/lib/voltura/data
+    ;;
+  renew-setup)
+    [[ $# == 1 ]] || fail 'Usage: vaultctl CONFIG renew-setup'
+    stop_api
+    "${compose[@]}" run --rm --no-deps api renew-setup /var/lib/voltura/data
+    ;;
+  up)
+    [[ $# == 1 && -f $data/vault.sqlite3 ]] || fail 'Initialize or restore the data directory before starting Vault.'
+    "${compose[@]}" up -d --no-build
+    ;;
+  health)
+    [[ $# -le 2 ]] || fail 'Usage: vaultctl CONFIG health [PUBLIC_CA_FILE]'
+    ca=()
+    if [[ $# == 2 ]]; then ca=(--cacert "$2"); fi
+    host=${values[1]%%:*}
+    curl --disable --silent --show-error --fail --max-time 15 --proto '=https' --noproxy '*' \
+      --resolve "$host:${values[3]}:${values[2]}" "${ca[@]}" "https://${values[1]}/health"
+    printf '\n'
+    ;;
+  backup|restore)
+    [[ $# -ge 3 ]] || fail 'Supply the restic repository directory and password file.'
+    repo=$(realpath -e -- "$2")
+    password=$(realpath -e -- "$3")
+    [[ -d $repo && -f $password && -s $password && $(stat -c %a -- "$password") =~ ^[46]00$ ]] || fail 'Use a local restic directory and a nonempty password file with mode 0600 or 0400.'
+    for item in "$repo" "$password"; do
+      [[ $item != "$root" && $item != "$root/"* ]] || fail 'Keep the backup destination and password outside Vault state.'
+    done
+    [[ $password != "$repo/"* && $repo != / && $root != "$repo/"* ]] || fail 'Keep the backup repository, password and Vault state separate.'
+    restic=(restic --repo "$repo" --password-file "$password")
+    if [[ $1 == backup ]]; then
+      [[ $# == 3 && -f $data/vault.sqlite3 ]] || fail 'Usage: vaultctl CONFIG backup REPOSITORY PASSWORD_FILE'
+      stop_api
+      (
+        cd -- "$root"
+        [[ -d data/vault.blobs ]] || fail 'Start the Vault API before the first backup.'
+        files=(data/vault.sqlite3 data/vault.blobs)
+        [[ ! -e data/vault.sqlite3-wal ]] || files+=(data/vault.sqlite3-wal)
+        "${restic[@]}" backup --tag voltura-vault -- "${files[@]}"
+      )
+    else
+      [[ $# == 5 && $4 =~ ^[a-f0-9]{64}$ ]] || fail 'Specify the full snapshot ID and a new restore directory.'
+      dest=$(realpath -m -- "$5")
+      [[ ! -e $dest && $dest != "$root/"* && $dest != "$repo/"* ]] || fail 'Restore to a new directory outside the live state and repository.'
+      mkdir -m 0700 -- "$dest"
+      "${restic[@]}" restore "$4" --target "$dest" --verify
+      [[ -d $dest/data && -f $dest/data/vault.sqlite3 && -z $(find "$dest" ! -type f ! -type d -print -quit) ]] \
+        || fail 'Unexpected restored paths. Do not start the restored server.'
+      chown -R 10001:10001 -- "$dest"
+      "${compose[@]}" run --rm --no-deps -v "$dest:/var/lib/voltura" api prepare-restore /var/lib/voltura/data
+      printf 'Validated restore in a separate directory. Use a separate Compose project and HTTPS endpoint for the drill.\n'
+    fi
+    ;;
+  *) fail 'Unknown vaultctl command.' ;;
+esac
