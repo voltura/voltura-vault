@@ -1,16 +1,11 @@
 # Set up Voltura Vault 0.1.2-alpha
 
-Use synthetic data for this prerelease. Keep the vault API on a private LAN or
+Use synthetic data to try the alpha. Keep the vault API on a private LAN or
 an existing VPN such as WireGuard. The operator provides DNS, network access,
 and a TLS certificate and key for the API hostname.
 
 Get the desktop package, Docker kit and `SHA256SUMS.txt` from the
 [v0.1.2-alpha release](https://github.com/voltura/voltura-vault/releases/tag/v0.1.2-alpha).
-The Windows installer reached first run in Windows Sandbox. The Ubuntu package
-reached first run in a clean Ubuntu 24.04 container. The macOS bundle passed
-architecture and signature checks. A scripted client recovered a synthetic note
-and attachment in a Docker restore drill. Full pairing, offline reconnect and
-restore with the packaged apps, plus interactive macOS testing, remain pending.
 
 ## Server
 

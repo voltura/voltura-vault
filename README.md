@@ -17,7 +17,9 @@ A self-hosted password manager for logins, secure notes, SSH keys and files. The
 
 ## Start here
 
-The public prerelease provides desktop packages for Windows x64, Ubuntu 24.04 amd64 and Apple Silicon macOS, plus a Docker kit for the private HTTPS API. You can also build and host the browser app separately. Use synthetic data while evaluating the alpha and practice restoring a backup. See the [setup guide](docs/SETUP.md) for platform checks and pairing instructions.
+The public alpha provides desktop packages for Windows x64, Ubuntu 24.04 amd64 and Apple Silicon macOS, plus a Docker kit for the private HTTPS API. You can also build and host the browser app separately. The [setup guide](docs/SETUP.md) covers installation, pairing, and backup and restore. Use synthetic data to try the alpha.
+
+Found a bug? [Report it on GitHub](https://github.com/voltura/voltura-vault/issues) with the app version, operating system, and steps to reproduce it using synthetic data. For vulnerabilities, use the [private reporting instructions](SECURITY.md).
 
 ## Support development
 
