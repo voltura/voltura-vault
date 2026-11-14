@@ -2,7 +2,7 @@ name: Public desktop prerelease
 
 on:
   push:
-    tags: ['v0.1.1']
+    tags: ['v*-alpha*']
 
 permissions:
   contents: read
@@ -77,18 +77,20 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           mkdir assets-out unpacked
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" = "$(node -p 'require("./package.json").version')"
           bundle="src-tauri/target/$TARGET/release/bundle"
           case "$PLATFORM" in
             windows)
-              cp "$bundle"/nsis/*-setup.exe assets-out/Voltura-Vault-0.1.1-windows-x64.exe
+              cp "$bundle"/nsis/*-setup.exe "assets-out/Voltura-Vault-$version-windows-x64.exe"
               "/c/Program Files/7-Zip/7z.exe" x -ounpacked assets-out/*.exe
               ;;
             linux)
-              cp "$bundle"/deb/*.deb assets-out/Voltura-Vault-0.1.1-ubuntu24.04-amd64.deb
+              cp "$bundle"/deb/*.deb "assets-out/Voltura-Vault-$version-ubuntu24.04-amd64.deb"
               dpkg-deb -x assets-out/*.deb unpacked
               test "$(dpkg-deb -f assets-out/*.deb Architecture)" = amd64
-              git archive --format=zip --prefix=voltura-vault-0.1.1/ \
-                --output=assets-out/Voltura-Vault-0.1.1-docker-kit.zip HEAD -- \
+              git archive --format=zip --prefix="voltura-vault-$version/" \
+                --output="assets-out/Voltura-Vault-$version-docker-kit.zip" HEAD -- \
                 LICENSE Dockerfile .dockerignore Cargo.toml Cargo.lock rust-toolchain.toml \
                 crates deploy/public docs/SETUP.md
               unzip -q assets-out/*-docker-kit.zip -d unpacked
@@ -98,7 +100,7 @@ jobs:
               test "$(lipo -archs "$app/Contents/MacOS/voltura-vault-public-alpha")" = arm64
               codesign --verify --deep --strict "$app"
               codesign -dv "$app" 2>&1 | grep -F 'Signature=adhoc'
-              ditto -c -k --sequesterRsrc --keepParent "$app" assets-out/Voltura-Vault-0.1.1-macos-arm64.zip
+              ditto -c -k --sequesterRsrc --keepParent "$app" "assets-out/Voltura-Vault-$version-macos-arm64.zip"
               ditto -x -k assets-out/*-macos-arm64.zip unpacked
               ;;
           esac

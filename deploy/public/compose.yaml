@@ -1,7 +1,7 @@
 services:
   api:
     build: ../..
-    image: voltura-vault-api:0.1.1
+    image: voltura-vault-api:0.1.2-alpha
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]

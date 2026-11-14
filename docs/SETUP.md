@@ -1,11 +1,11 @@
-# Set up Voltura Vault 0.1.1
+# Set up Voltura Vault 0.1.2-alpha
 
 Use synthetic data for this prerelease. Keep the vault API on a private LAN or
 an existing VPN such as WireGuard. The operator provides DNS, network access,
 and a TLS certificate and key for the API hostname.
 
 Get the desktop package, Docker kit and `SHA256SUMS.txt` from the
-[v0.1.1 release](https://github.com/voltura/voltura-vault/releases/tag/v0.1.1).
+[v0.1.2-alpha release](https://github.com/voltura/voltura-vault/releases/tag/v0.1.2-alpha).
 The Windows installer reached first run in Windows Sandbox. The Ubuntu package
 reached first run in a clean Ubuntu 24.04 container. The macOS bundle passed
 architecture and signature checks. A scripted client recovered a synthetic note
@@ -70,7 +70,7 @@ uses the build tag, which points to the same commit as the release tag. Replace
 
 ```sh
 sha256sum -c SHA256SUMS.txt
-gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.1 --signer-workflow voltura/voltura-vault/.github/workflows/public-prerelease.yml
+gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.2-alpha --signer-workflow voltura/voltura-vault/.github/workflows/public-prerelease.yml
 ```
 
 1. Open **Connect to Vault** and enter the root HTTPS URL. If the issuer is
@@ -81,9 +81,10 @@ gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/t
    generated recovery file offline, then select it to confirm. Run the unlock
    time measurement when prompted. On another device, enter the same URL and
    use the existing master password and recovery file.
-3. After the first unlock, Windows users can optionally enable Windows Hello.
-   Use the master password for sync. Try a synthetic note and attachment, sync
-   them on a second profile, then try offline unlock and reconnect.
+3. After the first unlock, Windows users can enable Windows Hello in Settings.
+   Confirm the master password once to enable unlock and automatic sync with an
+   updated Vault server. Try a synthetic note and attachment, sync them on a
+   second profile, then try offline unlock and reconnect.
 
 The alpha supports one paired server per desktop installation profile. Before
 changing servers, save the open edit, sync, and choose **Check before changing
