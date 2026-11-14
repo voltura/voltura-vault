@@ -78,8 +78,8 @@ gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/t
    use the existing master password and recovery file.
 3. After the first unlock, Windows users can enable Windows Hello in Settings.
    Confirm the master password once to enable unlock and automatic sync with an
-   updated Vault server. Try a synthetic note and attachment, sync them on a
-   second profile, then try offline unlock and reconnect.
+   updated Vault server. If sync authorization expires or is revoked, choose
+   **Reconnect sync** while the vault is open.
 
 The alpha supports one paired server per desktop installation profile. Before
 changing servers, save the open edit, sync, and choose **Check before changing
@@ -120,8 +120,6 @@ this drill with a disposable vault before relying on backups.
 ## Update an existing vault
 
 Keep the existing server state directory, key epoch, TLS settings and backup repository. Verify a recoverable backup before updating. Update the server in place, then update the desktop app using its existing profile and confirm its cached vault opens and syncs. Test migration and restore against a separate copy before changing live data, and stop if any check fails. Reserve restore for recovery because restoring an older snapshot can discard newer edits.
-
-On Windows, **Settings → Windows Hello → Enable Windows Hello** sets up unlock and sync together. Confirm the master password during setup. After an authorization expires or is revoked, use **Reconnect sync** while the vault is open.
 
 ## Optional browser client
 
