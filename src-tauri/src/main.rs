@@ -5,6 +5,8 @@ mod clipboard;
 mod hello_unlock;
 #[cfg(feature = "public-desktop")]
 mod transport;
+#[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
+mod sync_protection;
 
 #[cfg(any(feature = "vpn-client", feature = "public-desktop"))]
 fn bundled_url(url: &tauri::Url) -> bool {
@@ -123,7 +125,7 @@ fn main() {
     #[cfg(windows)]
     let builder = builder.manage(clipboard::Clipboard::default());
     #[cfg(all(windows, not(feature = "public-desktop")))]
-    let builder = builder.invoke_handler(tauri::generate_handler![hello_enroll, hello_evaluate, copy_to_windows_clipboard]);
+    let builder = builder.invoke_handler(tauri::generate_handler![hello_enroll, hello_evaluate, copy_to_windows_clipboard, sync_protection::protect_sync_capsule]);
     #[cfg(feature = "public-desktop")]
     let builder = {
         use transport::{vault_profile, vault_connect, vault_request, vault_commit};
@@ -131,7 +133,7 @@ fn main() {
         #[cfg(windows)]
         let builder = builder.invoke_handler(tauri::generate_handler![
             vault_profile, vault_connect, vault_request, vault_commit,
-            hello_enroll, hello_evaluate, copy_to_windows_clipboard]);
+            hello_enroll, hello_evaluate, copy_to_windows_clipboard, sync_protection::protect_sync_capsule]);
         #[cfg(not(windows))]
         let builder = builder.invoke_handler(tauri::generate_handler![
             vault_profile, vault_connect, vault_request, vault_commit]);

@@ -21,11 +21,11 @@ const testBuild = !import.meta.env.VITE_VAULT_PRODUCTION_RELEASE;
 export type Page = 'vault' | 'device' | 'attachments';
 export type Model = {
   page: Page; unlocked: boolean; hidden: boolean; busy: boolean; notice: string; error: string; syncPaused: boolean; rotationNeeded: boolean;
-  status: { exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable'; hello?: HelloCredential; helloOnly?: boolean; requiresRecoveryFile?: boolean; server?: string | null; importAvailable?: boolean; rejectedServerData?: boolean };
+  status: { exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable'; hello?: HelloCredential; helloOnly?: boolean; helloSyncReconnect?: boolean; masterSession?: boolean; server?: string | null; requiresRecoveryFile?: boolean; importAvailable?: boolean; rejectedServerData?: boolean };
   notes: VaultRecord[]; selected: number; newItem?: ImportedItem; draft: string; dirty: boolean;
   editor: ItemDraft;
   password: string; setup: string; recoveryFile?: File; recoveryDownloaded: boolean; calibration?: Calibration; online: boolean; mobileDetail: boolean;
-  theme: string; palette: string; timeout: number; clipboardSeconds: number; privateClipboard: boolean; helloAvailable: boolean; helloSetup: boolean; browserHelloPending: boolean;
+  theme: string; palette: string; timeout: number; clipboardSeconds: number; privateClipboard: boolean; helloAvailable: boolean; windowsVault: boolean; helloSetup: boolean; browserHelloPending: boolean;
   importFile?: File; importPassword: string; importPreview?: ImportSummary & { newItems: number; newFolders: number; duplicates: number; changed: number };
   importProgress?: { label: string; done?: number; total?: number };
   sourceVersions?: { id: string; size: number; created: number }[];
@@ -46,7 +46,7 @@ export type Actions = {
   generatorHistory: (action: HistoryAction) => Promise<HistoryEntry[]>;
   setTheme: (value: string) => void; setPalette: (value: string) => void; setTimeout: (value: number) => void;
   setClipboardSeconds: (value: number) => void;
-  unlockHello: () => void; enableHello: (password: string) => void; disableHello: () => void;
+  unlockHello: () => void; enableHello: (password: string) => void; reconnectHelloSync: (password: string) => void; disableHello: () => void;
   confirmBrowserHello: () => void;
   checkStorage: (persist: boolean) => void;
   recoverRotation: (password: string, recoveryFile: File) => void;
@@ -136,7 +136,9 @@ export function VaultView(props: { model: Model; actions: Actions }) {
   return <VaultSurface key={String(props.model.unlocked)} {...props}/>;
 }
 
-function HelloSetupFields({ busy, enable }: { busy: boolean; enable: Actions['enableHello'] }) {
+function HelloSetupFields({ busy, enable, label = 'Enable Windows Hello', hint = 'Save the passkey to this Windows device when prompted.' }: {
+  busy: boolean; enable: Actions['enableHello']; label?: string; hint?: string;
+}) {
   const id = useId();
   const input = useRef<HTMLInputElement>(null);
   function confirm() {
@@ -147,7 +149,7 @@ function HelloSetupFields({ busy, enable }: { busy: boolean; enable: Actions['en
     enable(password);
   }
   return <div>
-    <p className="fine">Save the passkey to this Windows device when prompted.</p>
+    {hint && <p className="fine">{hint}</p>}
     <label htmlFor={id}>Confirm master password</label>
     <input ref={input} id={id} type="password" autoComplete="off" required maxLength={1024} disabled={busy}
       onKeyDown={event => {
@@ -156,7 +158,7 @@ function HelloSetupFields({ busy, enable }: { busy: boolean; enable: Actions['en
           confirm();
         }
       }}/>
-    <button className="calibrate-button" type="button" disabled={busy} onClick={confirm}>Enable Windows Hello</button>
+    <button className="calibrate-button" type="button" disabled={busy} onClick={confirm}>{label}</button>
   </div>;
 }
 
@@ -365,6 +367,9 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
       <div className="page-content">
         {m.unlocked && !m.hidden && m.status.rejectedServerData &&
           <p role="status">Vault skipped server data it could not authenticate. Check the server before relying on this copy.</p>}
+        {m.unlocked && !m.hidden && m.status.helloSyncReconnect && !m.rotationNeeded && m.page !== 'device' &&
+          <div className="setting-row"><span>Sync needs to reconnect.</span>
+            <button disabled={m.busy} onClick={() => a.navigate('device')}>Reconnect sync</button></div>}
         {m.webUpdate?.version && <section className="web-update" aria-label="Vault update">
           <div><strong>New version available</strong><span>v{m.webUpdate.version}</span></div>
           <div className="web-update-actions">
@@ -493,7 +498,7 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
               <p className="fine">{m.status.server}</p>
               <button type="button" disabled={m.busy || m.dirty} onClick={a.checkPairing}>Check before changing servers</button>
             </article>}
-            {m.unlocked && m.status.remote === 'configured' && !m.status.helloOnly && <article className="card">
+            {m.unlocked && m.status.remote === 'configured' && m.status.masterSession && <article className="card">
               <h2>Source versions</h2>
               <p className="fine">Deployment snapshots can be restored with your offline source recovery key.</p>
               <details><summary>Set up source backups</summary>
@@ -511,7 +516,7 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
                 <button disabled={m.busy || !m.online} onClick={() => a.downloadSource(version.id, version.size)}>Download encrypted source</button>
               </div>)}
             </article>}
-            {m.unlocked && m.status.remote === 'configured' && !m.status.helloOnly && <article className="card">
+            {m.unlocked && m.status.remote === 'configured' && m.status.masterSession && <article className="card">
               <h2>Recovery Kit</h2>
               <p className="fine">Encrypted infrastructure keys for rebuilding Vault. Keep the recovery key and a kit copy outside the app.</p>
               <button disabled={m.busy || !m.online} onClick={() => a.listSources(true)}>Load recovery kits</button>
@@ -538,14 +543,23 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
             <h2 className="section-label">Device checks</h2>
             <div className="check-grid">
               <article className="card"><h3>Windows Hello</h3>
+                {m.helloAvailable && m.unlocked && <p className="fine">{m.status.hello ? 'Enabled' : 'Disabled'}</p>}
                 {!m.helloAvailable ? <p className="fine">Set up Windows Hello in the installed Windows app.</p>
                   : !m.unlocked ? <p className="fine">Unlock the vault to manage Windows Hello.</p>
-                  : m.status.hello ? <button type="button" disabled={m.busy} onClick={a.disableHello}>Turn off Windows Hello</button>
+                  : m.status.hello ? <>
+                    {m.status.helloSyncReconnect && !m.rotationNeeded &&
+                      <HelloSetupFields busy={m.busy || m.dirty || !m.online} enable={a.reconnectHelloSync}
+                        label="Reconnect sync" hint=""/>}
+                    <button type="button" disabled={m.busy} onClick={a.disableHello}>Turn off Windows Hello</button>
+                  </>
                   : m.browserHelloPending ? <>
                     <p className="fine">Windows saved your passkey. Confirm it to finish setup. If Windows can’t find it yet, wait a moment and try again.</p>
                     <button type="button" disabled={m.busy} onClick={a.confirmBrowserHello}>Confirm Windows Hello</button>
                   </>
-                  : <HelloSetupFields busy={m.busy} enable={a.enableHello}/>}
+                  : <HelloSetupFields busy={m.busy || (m.windowsVault && m.status.remote === 'configured' && !m.online)}
+                    enable={a.enableHello} hint={m.windowsVault && m.status.remote === 'configured'
+                      ? m.online ? '' : 'Connect to your vault to set up Windows Hello.'
+                      : undefined}/>}
               </article>
               <article className="card"><h3>Offline storage</h3><div className="button-row"><button disabled={m.busy} onClick={() => a.checkStorage(false)}>Check storage</button><button disabled={m.busy} onClick={() => a.checkStorage(true)}>Keep storage</button></div><details><summary>About local storage</summary><p>Only encrypted data is stored. Browser storage may be removed and is not a backup.</p></details></article>
               {testBuild && <article className="card">

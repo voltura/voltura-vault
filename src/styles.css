@@ -405,3 +405,5 @@ button.primary:hover:not(:disabled) { color:var(--primary-ink); background:var(-
     border-top: 1px solid var(--line);
   }
 }
+
+.settings-page > .card + .card { margin-top:16px; }

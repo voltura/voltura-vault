@@ -42,7 +42,7 @@ async fn list_archive(state: AppState, headers: HeaderMap, kind: Archive) -> Res
     let time = (state.clock)();
     let directories = kind.directories(&state.blobs)?;
     state.database(move |db| {
-        authorize(db, &presented, time)?;
+        if authorize(db, &presented, time)?.device.is_some() { return Err(ApiError::forbidden()); }
         let mut archives = Vec::new();
         let mut ids = std::collections::HashSet::new();
         let suffix = format!(".{}", kind.extension());
@@ -78,7 +78,7 @@ async fn archive_chunk(state: AppState, headers: HeaderMap, id: Uuid, index: u64
     let time = (state.clock)();
     let directories = kind.directories(&state.blobs)?;
     state.database(move |db| {
-        authorize(db, &presented, time)?;
+        if authorize(db, &presented, time)?.device.is_some() { return Err(ApiError::forbidden()); }
         let name = format!("{id}.{}", kind.extension());
         let path = directories.iter().map(|directory| directory.join(&name))
             .find(|path| fs::symlink_metadata(path).is_ok_and(|m| m.is_file()))

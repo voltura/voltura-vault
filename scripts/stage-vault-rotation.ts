@@ -113,7 +113,7 @@ export async function stageRotation(input: Input) {
   try {
     snapshot.exec('PRAGMA trusted_schema=OFF; BEGIN;');
     const version = snapshot.prepare('PRAGMA user_version').get()?.user_version;
-    if (typeof version !== 'number' || ![3, 4, 5, 6, 7].includes(version)) throw Error('Unsupported rotation snapshot schema');
+    if (typeof version !== 'number' || ![3, 4, 5, 6, 7, 8].includes(version)) throw Error('Unsupported rotation snapshot schema');
     const owner = snapshot.prepare(`SELECT vault,account,recovery,encrypted_config,${version >= 4 ? 'key_epoch' : '1'} AS epoch FROM owner WHERE singleton=1`).get() as Owner | undefined;
     if (!owner) throw Error('Rotation snapshot has no owner');
     const old = unpackConfig(owner.encrypted_config, owner.vault, owner.epoch);

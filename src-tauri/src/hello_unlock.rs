@@ -4,10 +4,13 @@ mod win {
     use rand::{rngs::OsRng, RngCore};
     use sha2::{Digest, Sha256};
     use std::{ptr, slice, sync::atomic::{AtomicBool, Ordering}};
-    use windows::{core::w, Win32::{Foundation::HWND, Networking::WindowsWebServices::*}};
+    use windows::{core::{PCWSTR, w}, Win32::{Foundation::HWND, Networking::WindowsWebServices::*}};
     use zeroize::{Zeroize, Zeroizing};
 
-    const RP: &str = "vault-ui.test";
+    const RP: &str = match option_env!("VOLTURA_BUILD_HELLO_RP") {
+        Some(domain) => domain,
+        None => "vault-ui.test",
+    };
     // The windows crate binds the v7 options and v6 attestation. Extend the
     // Windows SDK's C layouts for PRF evaluation on credential creation.
     #[repr(C)]
@@ -58,7 +61,7 @@ mod win {
     fn error(_: windows::core::Error) -> String { "Windows Hello did not complete. Try again or use your master password.".into() }
     fn json(kind: &str) -> Vec<u8> {
         let mut challenge = [0u8; 32]; OsRng.fill_bytes(&mut challenge);
-        serde_json::json!({ "type": kind, "challenge": URL_SAFE_NO_PAD.encode(challenge), "origin": "https://vault-ui.test", "crossOrigin": false }).to_string().into_bytes()
+        serde_json::json!({ "type": kind, "challenge": URL_SAFE_NO_PAD.encode(challenge), "origin": format!("https://{RP}"), "crossOrigin": false }).to_string().into_bytes()
     }
     fn client_data(json: &mut [u8]) -> WEBAUTHN_CLIENT_DATA {
         WEBAUTHN_CLIENT_DATA { dwVersion: 1, cbClientDataJSON: json.len() as u32, pbClientDataJSON: json.as_mut_ptr(), pwszHashAlgId: WEBAUTHN_HASH_ALGORITHM_SHA_256 }
@@ -85,7 +88,8 @@ mod win {
         if input.len() != 32 { return Err("Invalid Windows Hello enrollment.".into()); }
         let hwnd = HWND(window as *mut core::ffi::c_void);
         let mut user_id = [0u8; 32]; OsRng.fill_bytes(&mut user_id);
-        let rp = WEBAUTHN_RP_ENTITY_INFORMATION { dwVersion: 1, pwszId: w!("vault-ui.test"), pwszName: w!("Voltura Vault"), ..Default::default() };
+        let rp_id: Vec<u16> = RP.encode_utf16().chain([0]).collect();
+        let rp = WEBAUTHN_RP_ENTITY_INFORMATION { dwVersion: 1, pwszId: PCWSTR(rp_id.as_ptr()), pwszName: w!("Voltura Vault"), ..Default::default() };
         let user = WEBAUTHN_USER_ENTITY_INFORMATION { dwVersion: 1, cbId: 32, pbId: user_id.as_mut_ptr(), pwszName: w!("voltura-vault"), pwszDisplayName: w!("Voltura Vault"), ..Default::default() };
         let mut parameter = WEBAUTHN_COSE_CREDENTIAL_PARAMETER { dwVersion: 1, pwszCredentialType: WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY, lAlg: WEBAUTHN_COSE_ALGORITHM_ECDSA_P256_WITH_SHA256 };
         let parameters = WEBAUTHN_COSE_CREDENTIAL_PARAMETERS { cCredentialParameters: 1, pCredentialParameters: &mut parameter };
@@ -136,7 +140,8 @@ mod win {
             dwUserVerificationRequirement: WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
             pAllowCredentialList: &mut list, pHmacSecretSaltValues: &mut salts, ..Default::default() };
         let mut get_json = json("webauthn.get");
-        let assertion_ptr = unsafe { WebAuthNAuthenticatorGetAssertion(hwnd, w!("vault-ui.test"), &client_data(&mut get_json), Some(&options)) }.map_err(error)?;
+        let rp_id: Vec<u16> = RP.encode_utf16().chain([0]).collect();
+        let assertion_ptr = unsafe { WebAuthNAuthenticatorGetAssertion(hwnd, PCWSTR(rp_id.as_ptr()), &client_data(&mut get_json), Some(&options)) }.map_err(error)?;
         if assertion_ptr.is_null() { return Err("Windows returned no assertion".into()); }
         let assertion = Assertion(assertion_ptr);
         let value = unsafe { &*assertion.0 };

@@ -5,7 +5,9 @@ export const CHUNK_BYTES = 1_048_576;
 export const MAX_ATTACHMENT_BYTES = 100_000_000;
 export const SYNC_HISTORY_CHANGED = 'Server history changed. Your local edits are saved. Choose Resume sync after confirming the server restore.';
 export const VAULT_KEY_CHANGED = 'The vault key changed on the server. Recover this device in Settings to keep your offline changes.';
-export type Purpose = 'master-root' | 'record-key' | 'record' | 'attachment-key' | 'attachment' | 'attachment-manifest' | 'hello-root' | 'account-token' | 'recovery-device' | 'identifier-keys';
+export const HELLO_SYNC_RECONNECT = 'Confirm your master password to reconnect sync.';
+export const HELLO_SYNC_UNAVAILABLE = 'Could not reach the vault. Saved edits will sync when it reconnects.';
+export type Purpose = 'master-root' | 'record-key' | 'record' | 'attachment-key' | 'attachment' | 'attachment-manifest' | 'hello-root' | 'hello-sync' | 'account-token' | 'recovery-device' | 'identifier-keys';
 export interface Context { vaultId: string; epoch: number; objectId: string; revisionId: string }
 export type VaultKeyContext = Pick<Context, 'vaultId' | 'epoch'>;
 export interface Box { nonce: Uint8Array; ciphertext: Uint8Array }

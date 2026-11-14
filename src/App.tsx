@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { publicDesktop } from './desktop-channel';
 import { connectDesktop } from './desktop-transport';
 import { ORIGIN, WEB_ORIGIN } from './sync';
-import { CryptoClient } from './worker-client';
+import { CryptoClient, windowsVault } from './worker-client';
 import { IdleClock } from './idle';
 import { canUseHello, enrollHello, evaluateHello } from './hello';
-import { SYNC_HISTORY_CHANGED, VAULT_KEY_CHANGED, type AttachmentView, type HelloCredential } from './format';
+import { HELLO_SYNC_RECONNECT, HELLO_SYNC_UNAVAILABLE, SYNC_HISTORY_CHANGED, VAULT_KEY_CHANGED, type AttachmentView, type HelloCredential } from './format';
 import type { Calibration } from './calibration';
 import { readPreference, writePreference, readTimeout } from './preferences';
 import { VaultView, type Page } from './VaultView';
@@ -22,7 +22,8 @@ type SourceVersion = { id: string; size: number; created: number };
 type Status = {
   exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable';
   rejectedServerData?: boolean; server?: string | null;
-  hello?: HelloCredential; helloOnly?: boolean; requiresRecoveryFile?: boolean; importAvailable?: boolean;
+  hello?: HelloCredential; helloOnly?: boolean; helloSync?: boolean; helloSyncReconnect?: boolean; masterSession?: boolean;
+  requiresRecoveryFile?: boolean; importAvailable?: boolean;
 };
 export function App() {
   const webUpdate = useWebUpdate();
@@ -30,6 +31,7 @@ export function App() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [syncPaused, setSyncPaused] = useState(false);
+  const [syncRetry, setSyncRetry] = useState(false);
   const [rotationNeeded, setRotationNeeded] = useState(false);
   const [helloSetup, setHelloSetup] = useState(false);
   const [browserHelloToken, setBrowserHelloToken] = useState<string>();
@@ -76,7 +78,7 @@ export function App() {
     JSON.stringify(editor) !== JSON.stringify(itemDraft(currentItem.item, currentItem.text)))));
   const helloAvailable = canUseHello();
   const independentWeb = window.location.origin === WEB_ORIGIN;
-  const canSync = status.remote === 'configured' && !status.helloOnly;
+  const canSync = status.remote === 'configured' && !status.helloOnly && !syncPaused && !rotationNeeded;
   const refresh = async () => {
     const current = generation.current;
     const next = await client.current!.call<Status>('status');
@@ -89,10 +91,11 @@ export function App() {
     setBrowserHelloToken(undefined);
     setHelloSetup(false);
     setSyncPaused(false);
+    setSyncRetry(false);
     setRotationNeeded(false);
     setUnlocked(false); setNotes([]); setDraft(''); setPassword(''); setSetup(''); setRecoveryFile(undefined); setRecoveryDownloaded(false); setCalibration(undefined); setBusy(false); setError(''); setNotice(message);
     setEditor(itemDraft()); setSelected(-1); setNewItem(undefined); setMobileDetail(false);
-    setStatus(prior => ({ ...prior, pending: 0, attachments: [], helloOnly: false }));
+    setStatus(prior => ({ ...prior, pending: 0, attachments: [], helloOnly: false, masterSession: false, helloSyncReconnect: false }));
     setImportFile(undefined); setImportPassword(''); setImportPreview(undefined); setImportProgress(undefined);
     setSourceVersions(undefined);
     setRecoveryVersions(undefined);
@@ -103,7 +106,12 @@ export function App() {
     if (busy) return;
     setBusy(true); setError(''); setNotice(''); const current = generation.current;
     try { await action(); } catch (e) {
-      if (current === generation.current) setError(e instanceof Error ? e.message : 'Operation failed. Your existing saved data is unchanged.');
+      if (current === generation.current) {
+        const message = e instanceof Error ? e.message : 'Operation failed. Your existing saved data is unchanged.';
+        if (message === VAULT_KEY_CHANGED) setRotationNeeded(true);
+        if (message === HELLO_SYNC_RECONNECT || message === VAULT_KEY_CHANGED) await refresh().catch(() => {});
+        if (current === generation.current) setError(message);
+      }
     } finally { if (current === generation.current) setBusy(false); }
   }
   useEffect(() => {
@@ -231,6 +239,11 @@ export function App() {
     previousOnline.current = online;
     if (reconnected && unlocked && !busy && !dirty && canSync) void run(() => syncNow());
   }, [online, unlocked, busy, dirty, canSync]);
+  useEffect(() => {
+    if (!syncRetry || !canSync || !unlocked || !online || hidden || busy || dirty) return;
+    const retry = window.setTimeout(() => void run(() => syncNow()), 15_000);
+    return () => window.clearTimeout(retry);
+  }, [syncRetry, canSync, unlocked, online, hidden, busy, dirty]);
   const changePage = (next: Page) => {
     if (page === 'vault' && next !== 'vault' && !unlocked) setRecoveryFile(undefined);
     setPage(next);
@@ -251,11 +264,11 @@ export function App() {
       result = await client.current!.call<Note[]>(status.exists ? 'unlock' : 'create', { password, setup, recoveryFile, idleMs });
     }
     if (current !== generation.current) return;
-    await refresh();
+    const next = await refresh();
     if (current !== generation.current) return;
     showNotes(result); setUnlocked(true); setPassword(''); setSetup(''); setRecoveryFile(undefined); setRecoveryDownloaded(false); clock.current = new IdleClock(idleMs);
-    setNotice(hello && status.remote === 'configured' ? 'To sync, unlock with your master password.' : '');
-    if (!hello && online && (status.remote === 'configured' || status.remote === 'new')) await syncNow();
+    setNotice(hello && next.helloOnly && !windowsVault() ? 'To sync, unlock with your master password.' : '');
+    if (online && next.remote === 'configured' && !next.helloOnly) await syncNow();
   }
   async function syncNow(objectId = notes[selected]?.revision.context.objectId, resumeAfterRestore = false, reportSuccess = false, importing = false) {
     const current = generation.current;
@@ -269,6 +282,7 @@ export function App() {
       } : undefined);
       if (current !== generation.current) return;
       setSyncPaused(false);
+      setSyncRetry(false);
       showNotes(result.notes, objectId); await refresh();
       if (current !== generation.current) return;
       const warnings = [];
@@ -285,6 +299,8 @@ export function App() {
         setNotice(result.unavailable ? 'Vault synced. Some files are unavailable.' : 'Vault synced.');
       }
     } catch (error) {
+      if (current === generation.current) setSyncRetry(windowsVault() &&
+        error instanceof Error && (error.message === HELLO_SYNC_UNAVAILABLE || error instanceof TypeError || error.name === 'TimeoutError'));
       if (current === generation.current && error instanceof Error && error.message === SYNC_HISTORY_CHANGED) setSyncPaused(true);
       if (current === generation.current && error instanceof Error && error.message === VAULT_KEY_CHANGED) setRotationNeeded(true);
       throw error;
@@ -336,6 +352,10 @@ export function App() {
     const current = generation.current;
     setHelloSetup(true);
     try { await finishHelloSetup(masterPassword); }
+    catch (error) {
+      if (current === generation.current) await client.current!.call('hello-cancel').catch(() => {});
+      throw error;
+    }
     finally { if (current === generation.current) setHelloSetup(false); }
   }
   async function finishHelloSetup(masterPassword: string) {
@@ -393,9 +413,29 @@ export function App() {
       if (current === generation.current) pendingBrowserHello.current = undefined;
       const next = await refresh();
       if (current !== generation.current) return;
-      if (next.hello?.id !== credential.id) throw Error('Windows Hello setup was not saved. Try again.');
-      setNotice('Windows Hello is enabled on this device.');
+      const withSync = windowsVault() && next.remote === 'configured';
+      if (next.hello?.id !== credential.id || (withSync && !next.helloSync)) throw Error('Windows Hello setup was not saved. Try again.');
+      setNotice('Windows Hello enabled.');
     } finally { secret.fill(0); }
+  }
+  async function reconnectHelloSync(masterPassword: string) {
+    const credential = status.hello;
+    if (!credential || !online || dirty) return;
+    const current = generation.current;
+    setHelloSetup(true);
+    try {
+      setNotice('Confirm with Windows Hello…');
+      const secret = await helloSecret(credential);
+      try {
+        if (current !== generation.current) return;
+        await client.current!.call('hello-sync-reconnect', { id: credential.id, secret, password: masterPassword });
+      } finally { secret.fill(0); }
+      if (current !== generation.current) return;
+      await refresh();
+      if (current !== generation.current) return;
+      setNotice('Sync reconnected.');
+      if (!syncPaused) await syncNow(undefined, false, true);
+    } finally { if (current === generation.current) setHelloSetup(false); }
   }
   async function generateAttachment(file: File, recordId?: string) {
     const current = generation.current;
@@ -450,7 +490,7 @@ export function App() {
     } else if (keep) { await refresh(); if (current === generation.current) setNotice('Encrypted file available offline.'); }
     else setNotice(`${result.verifiedBytes.toLocaleString()} bytes verified.`);
   }
-  return <VaultView model={{ page, unlocked, hidden, busy, notice, error, status, syncPaused, rotationNeeded, notes, selected, newItem, draft, editor, dirty, password, setup, recoveryFile, recoveryDownloaded, calibration, online, mobileDetail, theme, palette, timeout, clipboardSeconds, privateClipboard: windowsClipboard(), helloAvailable, helloSetup, browserHelloPending: !!browserHelloToken, importFile, importPassword, importPreview, importProgress, sourceVersions, recoveryVersions, sourcePassword, sourceRecovery: !!sourceRecovery, webUpdate, independentWeb, publicDesktop }} actions={{
+  return <VaultView model={{ page, unlocked, hidden, busy, notice, error, status, syncPaused, rotationNeeded, notes, selected, newItem, draft, editor, dirty, password, setup, recoveryFile, recoveryDownloaded, calibration, online, mobileDetail, theme, palette, timeout, clipboardSeconds, privateClipboard: windowsClipboard(), helloAvailable, windowsVault: windowsVault(), helloSetup, browserHelloPending: !!browserHelloToken, importFile, importPassword, importPreview, importProgress, sourceVersions, recoveryVersions, sourcePassword, sourceRecovery: !!sourceRecovery, webUpdate, independentWeb, publicDesktop }} actions={{
     navigate: changePage,
     lock: () => lock(dirty ? 'Locked. Unsaved changes discarded; your last saved version is retained.' : undefined),
     unlock: () => void run(doUnlock), setPassword, setSetup, setRecoveryFile,
@@ -555,6 +595,7 @@ export function App() {
     },
     unlockHello: () => { if (helloAvailable && status.hello) void run(() => doUnlock(status.hello)); },
     enableHello: password => void run(() => enableHello(password)),
+    reconnectHelloSync: password => void run(() => reconnectHelloSync(password)),
     confirmBrowserHello: () => void run(confirmBrowserHello),
     disableHello: () => void run(async () => {
       await client.current!.call('hello-disable');

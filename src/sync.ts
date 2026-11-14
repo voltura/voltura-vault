@@ -17,6 +17,8 @@ export const separateClient = () => {
 export const syncEnabled = () => self.location.origin === ORIGIN || separateClient();
 const apiUrl = (path: string) => `${ORIGIN}/api/v1/${path}`;
 type WriteSigner = { challenge: string; privateKey: Uint8Array };
+type DeviceLogin = (key: Uint8Array) => Promise<Response>;
+export type SyncCredential = Uint8Array | DeviceLogin;
 function storageWrite(path: string) {
   return path === 'mutations' || path === 'files'
     || /^files\/[0-9a-f-]{36}\/(delete|finish|chunks\/\d+)$/i.test(path);
@@ -74,9 +76,20 @@ export async function initializeRemote(e: MasterEnvelope, account: Uint8Array, r
   if (!response.ok) throw Error('The server rejected vault setup. Reload to check whether setup already finished.');
 }
 
-export async function withVaultSession<T>(e: MasterEnvelope, account: Uint8Array, action: (send: VaultRequest) => Promise<T>) {
+export function deviceSyncRequest(device: string, e: MasterEnvelope, token: Uint8Array, action: 'enroll' | 'refresh' | 'revoke', writeKey?: Uint8Array) {
+  if (self.location.origin !== 'https://tauri.localhost') throw Error('Hello sync requires the Windows app.');
+  return request(`sync-devices/${device}${action === 'refresh' ? '/refresh' : ''}`,
+    { vaultId: e.context.vaultId, keyEpoch: e.context.epoch }, token,
+    action === 'revoke' ? 'DELETE' : undefined, undefined, writeKey);
+}
+
+export function withSyncLock<T>(action: () => Promise<T>) {
   if (!navigator.locks) throw Error('This browser cannot coordinate vault sync safely');
-  return navigator.locks.request('voltura-vault-sync', async () => {
+  return navigator.locks.request('voltura-vault-sync', action);
+}
+
+export async function withVaultSession<T>(e: MasterEnvelope, credential: SyncCredential, action: (send: VaultRequest) => Promise<T>) {
+  return withSyncLock(async () => {
     const vaultId = e.context.vaultId;
     if (publicDesktop) {
       const local = await db();
@@ -94,7 +107,8 @@ export async function withVaultSession<T>(e: MasterEnvelope, account: Uint8Array
     const pair = sodium.crypto_sign_keypair();
     let session: string | undefined;
     try {
-    const signedIn = await request('sessions', { vaultId, client: bearerSession ? 'native' : 'browser' }, account, undefined, undefined, pair.publicKey);
+    const signedIn = typeof credential === 'function' ? await credential(pair.publicKey)
+      : await request('sessions', { vaultId, client: bearerSession ? 'native' : 'browser' }, credential, undefined, undefined, pair.publicKey);
     if (signedIn.status === 401) {
       const remote = await remoteConfig().catch(() => undefined);
       if (remote && remote.context.vaultId !== vaultId) {
@@ -121,9 +135,9 @@ export async function withVaultSession<T>(e: MasterEnvelope, account: Uint8Array
   });
 }
 
-export async function synchronize(e: MasterEnvelope, root: Uint8Array, account: Uint8Array, resumeAfterRestore = false,
+export async function synchronize(e: MasterEnvelope, root: Uint8Array, credential: SyncCredential, resumeAfterRestore = false,
   progress?: (done: number, total: number) => void) {
-  return withVaultSession(e, account, async send => {
+  return withVaultSession(e, credential, async send => {
     const vaultId = e.context.vaultId;
     const key = sodium.crypto_kdf_derive_from_key(32, 1, 'VVSYNC01', root);
     try {

@@ -121,6 +121,12 @@ clean desktop profile, recover using the original recovery file and password,
 then check the expected note and compare the downloaded attachment bytes. Do
 this drill with a disposable vault before relying on backups.
 
+## Update an existing vault
+
+Keep the existing server state directory, key epoch, TLS settings and backup repository. Verify a recoverable backup before updating. Update the server in place, then update the desktop app using its existing profile and confirm its cached vault opens and syncs. Test migration and restore against a separate copy before changing live data, and stop if any check fails. Reserve restore for recovery because restoring an older snapshot can discard newer edits.
+
+On Windows, **Settings → Windows Hello → Enable Windows Hello** sets up unlock and sync together. Confirm the master password during setup. After an authorization expires or is revoked, use **Reconnect sync** while the vault is open.
+
 ## Optional browser client
 
 Serve the browser app on a separate trusted HTTPS origin. Set that origin in

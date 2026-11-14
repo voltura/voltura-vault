@@ -1,11 +1,12 @@
 /// <reference lib="webworker" />
 import { createVault, decryptRecord, derive, encryptRecord, identifierKey, open, ready, recoverDeviceKey, seal, sodium, unlock, validateNewMasterPassword, wipe } from './crypto';
-import { CHUNK_BYTES, chunkKey, context, MAX_FOLDER_NAME_LENGTH, type HelloCredential, type HelloEnvelope, type Kdf, type MasterEnvelope, type Revision } from './format';
+import { CHUNK_BYTES, chunkKey, context, HELLO_SYNC_RECONNECT, MAX_FOLDER_NAME_LENGTH, type HelloCredential, type HelloEnvelope, type Kdf, type MasterEnvelope, type Revision } from './format';
 import { currentRevisions, db, publishAttachment, removeUnpublishedChunks, saveAttachmentChunks, saveImport, saveInitial, saveRevision } from './storage';
 import { chunkAad, readAttachment, startAttachment } from './attachments';
 import { calibrate, type Calibration } from './calibration';
 import { callDesktop, publicDesktop, setDesktopChannel } from './desktop-channel';
-import { initializeRemote, remoteConfig, separateClient, syncEnabled, synchronize, withVaultSession } from './sync';
+import { initializeRemote, remoteConfig, separateClient, syncEnabled, synchronize, withSyncLock, withVaultSession } from './sync';
+import { disableHelloSync, enrollHelloSync, flushDeviceRevocations, helloKeyId, helloSyncKey, refreshHelloSync, savedHelloSync, type ProtectCapsule } from './hello-sync';
 import { attachmentDetails, deleteVaultFile, downloadChunk, eraseLocalFile, fileManifest, type VaultRequest } from './file-sync';
 import { decodeImported, encodeImported, parseBitwarden, type ImportedItem } from './bitwarden';
 import { itemDraft, itemType, ITEM_TYPES, makeItem, reviseItem, type ItemDraft, type ItemType } from './item-editor';
@@ -16,10 +17,12 @@ import { decodeFolder, encodeFolder, TRASH_MARKER, vaultFolders, type Folder, ty
 
 let root: Uint8Array | undefined, envelope: MasterEnvelope | undefined;
 let account: Uint8Array | undefined;
+let syncKey: Uint8Array | undefined;
+let syncReconnect = false;
 let pendingRecoveryDigest: Uint8Array | undefined;
 let importPlan: { items: Revision[]; folders: Revision[] } | undefined;
 let calibration: Calibration | undefined;
-let helloEnrollment: { token: string; expires: number } | undefined;
+let helloEnrollment: { token: string; expires: number; account?: Uint8Array } | undefined;
 let sessionTimeout = 0, sessionExpires = 0, sessionObserved = 0;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 let sessionView: { page: string; objectId?: string } = { page: 'vault' };
@@ -28,8 +31,6 @@ function newRevisionContext(objectId?: string) {
   const { vaultId, epoch } = envelope!.context;
   return context(vaultId, objectId, epoch);
 }
-const helloKeyId = ({ context }: MasterEnvelope) => `hello:${context.vaultId}:${context.epoch}:${context.revisionId}`;
-
 const deviceKeyId = ({ context }: MasterEnvelope) => `device:${context.vaultId}:${context.epoch}:${context.revisionId}`;
 const keyEncoding = () => sodium.base64_variants.URLSAFE_NO_PADDING;
 async function readDeviceKey(e: MasterEnvelope) {
@@ -48,9 +49,9 @@ async function readRecoveryFile(file: unknown): Promise<Uint8Array> {
   return parseRecoveryText(await file.text());
 }
 
-async function confirmPassword(password: string, e: MasterEnvelope) {
+async function confirmPassword(password: string, e: MasterEnvelope, useAccount?: (token: Uint8Array) => void) {
   const deviceKey = await readDeviceKey(e);
-  try { return unlock(password, e, undefined, deviceKey); }
+  try { return unlock(password, e, useAccount, deviceKey); }
   finally { wipe(deviceKey); }
 }
 
@@ -65,17 +66,21 @@ function readHello(value: string | undefined): HelloEnvelope | undefined {
   } catch { return; }
 }
 
-function helloWrappingKey(secret: unknown) {
+function helloSecret(secret: unknown) {
   if (!(secret instanceof Uint8Array) || secret.length !== 32) throw Error('Windows Hello could not unlock this vault.');
-  try { return sodium.crypto_kdf_derive_from_key(32, 1, 'VVHELLO1', secret); }
-  finally { wipe(secret); }
+  return secret;
+}
+function clearHelloEnrollment() {
+  wipe(helloEnrollment?.account);
+  helloEnrollment = undefined;
 }
 function clearSession() {
   clearTimeout(expiryTimer);
-  wipe(root); wipe(account); wipe(pendingRecoveryDigest);
+  wipe(root); wipe(account); wipe(syncKey); wipe(pendingRecoveryDigest);
   pendingRecoveryDigest = undefined;
-  root = account = undefined; envelope = undefined; importPlan = undefined; calibration = undefined;
-  helloEnrollment = undefined;
+  root = account = syncKey = undefined; envelope = undefined; importPlan = undefined; calibration = undefined;
+  syncReconnect = false;
+  clearHelloEnrollment();
   sessionTimeout = sessionExpires = sessionObserved = 0;
   sessionView = { page: 'vault' };
 }
@@ -141,9 +146,18 @@ function importedObjectId(identity: string, key: Uint8Array) {
 }
 
 async function handle(type: string, payload: Record<string, unknown>, progress: (text: string) => void,
-  steps: (done: number, total: number) => void): Promise<unknown> {
+  steps: (done: number, total: number) => void, dpapi: ProtectCapsule, windows: boolean): Promise<unknown> {
   await ready();
   checkSession();
+  if (helloEnrollment && helloEnrollment.expires <= Date.now()) clearHelloEnrollment();
+  const windowsApp = windows && self.location.origin === 'https://tauri.localhost';
+  const syncCredential = () => {
+    if (account) return account;
+    const e = envelope, key = syncKey;
+    if (!windowsApp) throw Error('Unlock with your master password to sync.');
+    if (!e || !key || syncReconnect) throw Error(HELLO_SYNC_RECONNECT);
+    return (writeKey: Uint8Array) => refreshHelloSync(e, key, writeKey, dpapi);
+  };
   switch (type) {
     case 'generator-history': {
       if (!navigator.locks) throw Error('This browser cannot coordinate generator history.');
@@ -191,6 +205,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         (await d.get('sync', `rejected-revisions:${local.context.vaultId}`) ||
           await d.get('sync', `rejected-attachments:${local.context.vaultId}`)));
       const savedHello = local && readHello(await d.get('sync', helloKeyId(local)));
+      const savedSync = windowsApp && local && savedHello ? await savedHelloSync(local) : undefined;
       checkSession();
       const key = root;
       const attachments = key ? files.map(file => ({ ...file, ...attachmentDetails(file, key) })) : [];
@@ -200,26 +215,35 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         importAvailable: canImport(), exists: !!local || remote === 'configured', pending: key ? pending : 0, attachments,
         rejectedServerData: !!key && rejectedServerData,
         hello: savedHello ? { id: savedHello.id, input: savedHello.input } : undefined,
-        helloOnly: !!(key && envelope?.account && !account) };
+        helloSync: !!savedSync,
+        helloSyncReconnect: !!(key && savedSync && syncReconnect),
+        masterSession: !!(key && account),
+        helloOnly: !!(key && envelope?.account && !account && (!syncKey || !savedSync || syncReconnect)) };
     }
     case 'hello-confirm': {
       unlocked();
-      helloEnrollment = undefined;
-      let verified: Uint8Array;
-      try { verified = await confirmPassword(String(payload.password), envelope!); }
-      catch { throw Error('The master password is incorrect.'); }
+      clearHelloEnrollment();
+      const e = envelope!;
+      let verified: Uint8Array | undefined, accountProof: Uint8Array | undefined;
       try {
+        const capture = windowsApp && e.account ? (token: Uint8Array) => { accountProof = token.slice(); } : undefined;
+        try { verified = await confirmPassword(String(payload.password), e, capture); }
+        catch { throw Error('The master password is incorrect.'); }
         checkSession();
         if (!sodium.memcmp(unlocked(), verified)) throw Error('Unlock the vault with your master password first.');
         const token = crypto.randomUUID();
-        helloEnrollment = { token, expires: Date.now() + 135_000 };
+        helloEnrollment = { token, expires: Date.now() + 135_000, account: accountProof };
+        accountProof = undefined;
         return token;
-      } finally { wipe(verified); }
+      } finally { wipe(verified); wipe(accountProof); }
     }
+    case 'hello-cancel': clearHelloEnrollment(); return;
     case 'hello-enroll': {
-      const wrappingKey = helloWrappingKey(payload.secret);
+      const secret = helloSecret(payload.secret);
+      const wrappingKey = sodium.crypto_kdf_derive_from_key(32, 1, 'VVHELLO1', secret);
       const confirmation = helloEnrollment;
       helloEnrollment = undefined;
+      let key: Uint8Array | undefined;
       try {
         unlocked();
         const e = envelope!;
@@ -229,28 +253,65 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         const credential = payload.credential as HelloCredential;
         if (!credential || !/^[A-Za-z0-9_-]{1,1366}$/.test(credential.id)
             || !(credential.input instanceof Uint8Array) || credential.input.length !== 32) throw Error('Invalid Windows Hello passkey.');
-        const d = await db();
         checkSession();
         const box = seal(unlocked(), wrappingKey, 'hello-root', e.context);
-        await d.put('sync', JSON.stringify({
+        const hello = JSON.stringify({
           id: credential.id, input: sodium.to_base64(credential.input),
           nonce: sodium.to_base64(box.nonce), ciphertext: sodium.to_base64(box.ciphertext),
-        }), helloKeyId(e));
-      } finally { wipe(wrappingKey); }
+        });
+        if (windowsApp && e.account) {
+          const accountProof = confirmation.account;
+          if (!accountProof) throw Error('Confirm your master password again to finish Windows Hello setup.');
+          const candidate = helloSyncKey(secret, credential);
+          key = candidate;
+          await withSyncLock(async () => {
+            checkSession(); unlocked();
+            await enrollHelloSync(e, accountProof, candidate, hello, dpapi, true);
+          });
+          checkSession(); unlocked();
+          wipe(syncKey); syncKey = key; key = undefined; syncReconnect = false;
+        } else await (await db()).put('sync', hello, helloKeyId(e));
+      } finally { wipe(secret); wipe(wrappingKey); wipe(key); wipe(confirmation?.account); }
       return;
     }
     case 'hello-disable': {
       unlocked();
-      const id = helloKeyId(envelope!);
-      await (await db()).delete('sync', id);
+      const e = envelope!;
+      if (windowsApp && e.account) await withSyncLock(() => disableHelloSync(e, syncKey, account, dpapi));
+      else await (await db()).delete('sync', helloKeyId(e));
+      wipe(syncKey); syncKey = undefined; syncReconnect = false;
+      return;
+    }
+    case 'hello-sync-reconnect': {
+      const secret = helloSecret(payload.secret);
+      let verified: Uint8Array | undefined, accountProof: Uint8Array | undefined, key: Uint8Array | undefined;
+      let wrap: Uint8Array | undefined, helloRoot: Uint8Array | undefined;
+      try {
+        const activeRoot = unlocked(), e = envelope!;
+        if (!windowsApp || !e.account) throw Error('Hello sync requires the Windows app and a connected vault.');
+        const hello = await (await db()).get('sync', helloKeyId(e)), saved = readHello(hello);
+        if (!hello || !saved || saved.id !== payload.id) throw Error('Set up Windows Hello before enabling sync.');
+        try { verified = await confirmPassword(String(payload.password), e, token => { accountProof = token.slice(); }); }
+        catch { throw Error('The master password is incorrect.'); }
+        checkSession();
+        if (unlocked() !== activeRoot || !accountProof || !sodium.memcmp(activeRoot, verified)) throw Error('Unlock this vault again.');
+        wrap = sodium.crypto_kdf_derive_from_key(32, 1, 'VVHELLO1', secret);
+        helloRoot = open(saved.root, wrap, 'hello-root', e.context, 32);
+        if (helloRoot.length !== 32 || !sodium.memcmp(activeRoot, helloRoot)) throw Error('Windows Hello could not confirm this vault.');
+        key = helloSyncKey(secret, saved);
+        await withSyncLock(async () => {
+          checkSession(); unlocked();
+          await enrollHelloSync(e, accountProof!, key!, hello, dpapi);
+        });
+        checkSession(); unlocked();
+        wipe(syncKey); syncKey = key; key = undefined; syncReconnect = false;
+      } finally { wipe(secret); wipe(verified); wipe(accountProof); wipe(key); wipe(wrap); wipe(helloRoot); }
       return;
     }
     case 'hello-unlock': {
-      const wrappingKey = helloWrappingKey(payload.secret);
-      if (root) {
-        wipe(wrappingKey);
-        throw Error('Lock the vault first.');
-      }
+      const secret = helloSecret(payload.secret);
+      const wrappingKey = sodium.crypto_kdf_derive_from_key(32, 1, 'VVHELLO1', secret);
+      if (root) { wipe(secret); wipe(wrappingKey); throw Error('Lock the vault first.'); }
       try {
         const d = await db(), e = await d.get('config', 'master');
         const saved = e && readHello(await d.get('sync', helloKeyId(e)));
@@ -258,13 +319,14 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         root = open(saved.root, wrappingKey, 'hello-root', e.context, 32);
         if (root.length !== 32) throw Error('Invalid vault key.');
         envelope = e;
+        if (windowsApp && e.account && await savedHelloSync(e)) syncKey = helloSyncKey(secret, saved);
         if (e.context.epoch > 1) await retireGeneratorHistory(e.context).catch(() => undefined);
         startSession(payload.idleMs);
         return await notes();
       } catch {
         clearSession();
         throw Error('Windows Hello could not unlock the vault. Use your master password.');
-      } finally { wipe(wrappingKey); }
+      } finally { wipe(secret); wipe(wrappingKey); }
     }
     case 'calibrate': {
       calibration = undefined;
@@ -538,12 +600,18 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
       return { added, skipped: items.length - added, foldersAdded: result.added - added, notes: await notes() };
     }
     case 'sync': {
-      if (!account || !envelope) throw Error('This vault is stored on this device');
-      const result = await synchronize(envelope, unlocked(), account, payload.resumeAfterRestore === true, payload.importProgress === true ? steps : undefined);
+      const key = unlocked(), e = envelope!;
+      if (!e.account) throw Error('This vault is stored on this device');
+      if (account && windowsApp) await withSyncLock(async () => {
+        checkSession();
+        if (account) await flushDeviceRevocations(e, account);
+      });
+      checkSession(); unlocked();
+      const result = await synchronize(e, key, syncCredential(), payload.resumeAfterRestore === true, payload.importProgress === true ? steps : undefined);
       return { ...result, notes: await notes() };
     }
     case 'recover-rotation': {
-      if (!account || !envelope?.recoveryDevice) throw Error('Unlock with the previous master password first.');
+      if (!envelope?.recoveryDevice) throw Error('Unlock with the previous master password first.');
       const old = envelope, oldRoot = unlocked(), next = await remoteConfig();
       if (!next?.recoveryDevice || next.context.vaultId !== old.context.vaultId || next.context.epoch <= old.context.epoch) {
         throw Error('The server has no newer key for this vault.');
@@ -673,7 +741,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
           throw Error('Connect to the vault and unlock with your master password to delete this file.');
         }
       };
-      if (account && syncEnabled()) await withVaultSession(active, account, remove);
+      if (active.account && syncEnabled()) await withVaultSession(active, syncCredential(), remove);
       else await remove();
       return;
     }
@@ -697,8 +765,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         });
       }
       if (a.offline === false) {
-        if (!account || !envelope) throw Error('Connect to Vault to open this file');
-        await withVaultSession(envelope, account, async send => {
+        await withVaultSession(envelope!, syncCredential(), async send => {
           if (!keep) return consume(send);
           // Another tab may have finished caching while this one waited for the lock.
           if ((await d.get('attachments', id))?.offline === true) return consume();
@@ -717,12 +784,33 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
 // Serializing prevents overlapping calibration/unlock operations and mutable key races.
 let queue = Promise.resolve();
 function enqueue(action: () => void | Promise<void>) { queue = queue.then(action); return queue; }
-type Request = { id: number; type: string; payload: Record<string, unknown> };
+type Request = { id: number; type: string; payload: Record<string, unknown>; windows?: boolean;
+  syncCapsuleResult?: number; bytes?: Uint8Array };
+let nextCapsule = 0;
+let protecting: { id: number; resolve: (bytes?: Uint8Array) => void } | undefined;
 function receive(event: MessageEvent<Request>, send: (message: unknown) => void) {
-  const { id, type, payload } = event.data;
+  const { id, type, payload, windows, syncCapsuleResult, bytes } = event.data;
+  if (syncCapsuleResult !== undefined) {
+    if (protecting?.id === syncCapsuleResult) protecting.resolve(bytes);
+    return;
+  }
+  const dpapi: ProtectCapsule = (bytes, protect) => new Promise((resolve, reject) => {
+    const id = ++nextCapsule;
+    const timer = setTimeout(() => protecting?.id === id && protecting.resolve(), 5000);
+    protecting = { id, resolve: reply => {
+      clearTimeout(timer); protecting = undefined;
+      if (reply instanceof Uint8Array && reply.length > 0 && reply.length <= 4096) resolve(reply);
+      else reject(Error('Windows could not protect this device’s sync credential.'));
+    } };
+    try { send({ syncCapsule: { id, bytes, protect } }); }
+    catch { protecting.resolve(); }
+  });
   void enqueue(async () => {
-    try { send({ id, result: await handle(type, payload, progress => send({ progress }), (done, total) => send({ id, steps: { done, total } })) }); }
-    catch (e) { send({ id, error: e instanceof Error ? e.message : 'Operation failed' }); }
+    try { send({ id, result: await handle(type, payload, progress => send({ progress }), (done, total) => send({ id, steps: { done, total } }), dpapi, windows === true) }); }
+    catch (e) {
+      if (e instanceof Error && e.message === HELLO_SYNC_RECONNECT && syncKey) syncReconnect = true;
+      send({ id, error: e instanceof Error ? e.message : 'Operation failed' });
+    }
   });
 }
 if ('onconnect' in self) {

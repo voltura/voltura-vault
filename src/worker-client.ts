@@ -5,6 +5,8 @@ import cryptoWorkerUrl from './crypto.worker?worker&url';
 const TAB_SESSION = 'voltura-tab-session';
 type CryptoTransport = { port: Worker | MessagePort; disconnect: () => void };
 
+export const windowsVault = () => '__TAURI_INTERNALS__' in window && window.location?.origin === 'https://tauri.localhost';
+
 export class CryptoClient {
   private worker: CryptoTransport | undefined;
   private tabSession?: string;
@@ -23,6 +25,10 @@ export class CryptoClient {
     const worker = this.openTransport();
     worker.port.onmessage = ({ data }) => {
       if (this.worker !== worker) return;
+      if (data.syncCapsule) {
+        void this.protectSyncCapsule(worker, data.syncCapsule);
+        return;
+      }
       if (data.progress) { this.progress(data.progress); return; }
       const request = this.pending.get(data.id); if (!request) return;
       if (data.steps) { request.steps?.(data.steps.done, data.steps.total); return; }
@@ -38,6 +44,16 @@ export class CryptoClient {
     worker.port.onmessageerror = fail;
     worker.onError(event => { event.preventDefault(); fail(); });
     return worker;
+  }
+  private async protectSyncCapsule(worker: CryptoTransport, request: { id: number; bytes: Uint8Array; protect: boolean }) {
+    let bytes: Uint8Array | undefined;
+    try {
+      if (windowsVault()) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        bytes = new Uint8Array(await invoke<ArrayBuffer>('protect_sync_capsule', { bytes: Array.from(request.bytes), protect: request.protect }));
+      }
+    } catch { /* The worker handles an unavailable or invalid capsule. */ }
+    if (this.worker === worker) worker.port.postMessage({ syncCapsuleResult: request.id, bytes });
   }
   private openTransport() {
     if (this.sharedAvailable) {
@@ -71,7 +87,7 @@ export class CryptoClient {
     return new Promise<T>((resolve, reject) => {
       this.worker ??= this.start();
       const id = ++this.next; this.pending.set(id, { resolve: result => resolve(result as T), reject, steps });
-      try { this.worker.port.postMessage({ id, type, payload }); }
+      try { this.worker.port.postMessage({ id, type, payload, windows: windowsVault() }); }
       catch (error) { this.pending.delete(id); reject(error instanceof Error ? error : Error('Worker request could not be sent')); }
     });
   }

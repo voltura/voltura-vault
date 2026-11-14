@@ -19,6 +19,114 @@ const VAULT: &str = "00000000-0000-0000-0000-000000000001";
 const HOST: &str = "vault-api.test";
 const ORIGIN: &str = "https://vault-api.test";
 static NEXT: AtomicU64 = AtomicU64::new(0);
+const SYNC_DEVICE: &str = "40000000-0000-0000-0000-000000000001";
+
+fn device_request(method: &str, device: &str, refresh: bool, token: &str) -> Request<Body> {
+    let suffix = if refresh { "/refresh" } else { "" };
+    let mut request = Fixture::request(method, &format!("/api/v1/sync-devices/{device}{suffix}"), Some(token),
+        Some(json!({"vaultId":VAULT,"keyEpoch":1})));
+    request.headers_mut().insert(header::ORIGIN, "https://tauri.localhost".parse().unwrap());
+    if refresh { request.headers_mut().insert("x-vault-write-key", write_key().parse().unwrap()); }
+    request
+}
+
+async fn response_json(response: Response) -> Value {
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn hello_sync_rotates_refreshes_and_revokes_on_replay_without_granting_account_access() {
+    let f = Fixture::new();
+    f.setup().await;
+    let mut web = device_request("POST", SYNC_DEVICE, false, &f.account);
+    web.headers_mut().insert(header::ORIGIN, "https://vault-ui.test".parse().unwrap());
+    assert_eq!(f.call(web).await.status(), StatusCode::FORBIDDEN);
+    let issued = response_json(f.call(device_request("POST", SYNC_DEVICE, false, &f.account)).await).await;
+    let refresh = issued["refreshToken"].as_str().unwrap();
+    assert_eq!(f.call(device_request("POST", SYNC_DEVICE, false, refresh)).await.status(), StatusCode::UNAUTHORIZED);
+    let mut no_proof_key = device_request("POST", SYNC_DEVICE, true, refresh);
+    no_proof_key.headers_mut().remove("x-vault-write-key");
+    assert_eq!(f.call(no_proof_key).await.status(), StatusCode::FORBIDDEN);
+    let renewed = response_json(f.call(device_request("POST", SYNC_DEVICE, true, refresh)).await).await;
+    let access = renewed["token"].as_str().unwrap();
+    let next = renewed["refreshToken"].as_str().unwrap();
+    assert_ne!(refresh, next);
+    assert_eq!(renewed["refreshExpiresAt"].as_u64().unwrap() - renewed["expiresAt"].as_u64().unwrap(), 30 * 86400 - 900);
+    let changes = |token| Fixture::request("POST", "/api/v1/changes", Some(token), Some(json!({"cursor":"0"})));
+    assert_eq!(f.call(changes(access)).await.status(), StatusCode::OK);
+    assert_eq!(f.call(changes(next)).await.status(), StatusCode::UNAUTHORIZED);
+    for path in ["/api/v1/source-archives/list", "/api/v1/recovery-kits/list",
+        "/api/v1/source-archives/40000000-0000-0000-0000-000000000001/0", "/api/v1/recovery-kits/40000000-0000-0000-0000-000000000001/0"] {
+        assert_eq!(f.call(Fixture::request("POST", path, Some(access), Some(json!({})))).await.status(), StatusCode::FORBIDDEN);
+    }
+    let mutation = json!({"version":1,"epoch":1,"objectId":"10000000-0000-0000-0000-000000000001",
+        "revisionId":"20000000-0000-0000-0000-000000000001","mutationId":"30000000-0000-0000-0000-000000000001",
+        "parents":[],"envelope":STANDARD.encode([1;144])});
+    let submit = || Fixture::request("POST", "/api/v1/mutations", Some(access), Some(mutation.clone()));
+    let mut unsigned = submit();
+    unsigned.headers_mut().remove("x-vault-write-proof");
+    assert_eq!(f.call(unsigned).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(f.call(submit()).await.status(), StatusCode::OK);
+    let stranger = SecretToken::generate().unwrap().encode();
+    assert_eq!(f.call(device_request("POST", SYNC_DEVICE, true, &stranger)).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(f.call(changes(access)).await.status(), StatusCode::OK);
+    assert_eq!(f.call(device_request("POST", SYNC_DEVICE, true, refresh)).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(f.call(changes(access)).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(f.call(device_request("POST", SYNC_DEVICE, true, next)).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(f.call(changes(&f.login().await)).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn hello_sync_rejects_expired_devices_and_clears_access_on_disable_operator_revoke_or_restore() {
+    let f = Fixture::new();
+    f.setup().await;
+    for action in ["expiry", "self revoke", "account revoke", "operator revoke", "restore"] {
+        let issued = response_json(f.call(device_request("POST", SYNC_DEVICE, false, &f.account)).await).await;
+        let refresh = issued["refreshToken"].as_str().unwrap();
+        if action == "expiry" {
+            let db = f.database();
+            db.execute("UPDATE sync_devices SET expires=?1", [now()]).unwrap();
+            assert_eq!(f.call(device_request("POST", SYNC_DEVICE, true, refresh)).await.status(), StatusCode::UNAUTHORIZED);
+            continue;
+        }
+        let session = response_json(f.call(device_request("POST", SYNC_DEVICE, true, refresh)).await).await;
+        match action {
+            "self revoke" | "account revoke" => {
+                let token = if action == "self revoke" { refresh } else { &f.account };
+                assert_eq!(f.call(device_request("DELETE", SYNC_DEVICE, false, token)).await.status(), StatusCode::NO_CONTENT);
+            }
+            "operator revoke" => assert!(voltura_vault_server::revoke_sync_device(&f.directory, SYNC_DEVICE.parse().unwrap()).unwrap()),
+            "restore" => voltura_vault_server::mark_restored(&mut f.database()).unwrap(),
+            _ => unreachable!(),
+        }
+        assert_eq!(f.call(device_request("POST", SYNC_DEVICE, true, session["refreshToken"].as_str().unwrap())).await.status(), StatusCode::UNAUTHORIZED);
+        let access = Fixture::request("GET", "/api/v1/session", session["token"].as_str(), None);
+        assert_eq!(f.call(access).await.status(), StatusCode::UNAUTHORIZED);
+        let db = f.database();
+        assert_eq!(db.query_row("SELECT count(*) FROM used_sync_refreshes", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn schema_seven_migration_preserves_existing_access_and_writes() {
+    let f = Fixture::new();
+    f.setup().await;
+    let token = f.login().await;
+    let db = f.database();
+    db.execute_batch("DROP INDEX sessions_device;
+        ALTER TABLE sessions DROP COLUMN device;
+        DROP TABLE used_sync_refreshes;
+        DROP TABLE sync_devices;
+        PRAGMA user_version=7;").unwrap();
+    let upgraded = router(AppState::open(&f.directory.join("vault.sqlite3")).unwrap());
+    let response = upgraded.oneshot(Fixture::request("POST", "/api/v1/mutations", Some(&token), Some(json!({
+        "version":1,"epoch":1,"objectId":"10000000-0000-0000-0000-000000000001",
+        "revisionId":"20000000-0000-0000-0000-000000000001","mutationId":"30000000-0000-0000-0000-000000000001",
+        "parents":[],"envelope":STANDARD.encode([1;144])
+    })))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
 fn write_pair() -> ring::signature::Ed25519KeyPair {
     ring::signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap()
@@ -169,6 +277,9 @@ async fn rotation_guards_live_writes_and_atomically_replaces_credentials_and_fil
 
     let f = Fixture::new();
     f.setup().await;
+    let device = response_json(f.call(device_request("POST", SYNC_DEVICE, false, &f.account)).await).await;
+    let refresh = device["refreshToken"].as_str().unwrap();
+    let device_session = response_json(f.call(device_request("POST", SYNC_DEVICE, true, refresh)).await).await;
     let old_session = f.login().await;
     let old_point = rotation::inspect(&f.directory).unwrap();
     let object = "10000000-0000-0000-0000-000000000001";
@@ -291,6 +402,8 @@ async fn rotation_guards_live_writes_and_atomically_replaces_credentials_and_fil
     assert!(AppState::open_with_epoch(&active_database, 1, Some(minimum)).is_ok());
     assert!(AppState::open_with_epoch(&active_database, 1, Some(1)).is_err());
     assert_eq!(f.call(request("/api/v1/changes", &old_session, Some(json!({"cursor":"0"})))).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(f.call(device_request("POST", SYNC_DEVICE, true, device_session["refreshToken"].as_str().unwrap())).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(db.query_row("SELECT count(*) FROM sync_devices", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
     let login = |token| request("/api/v1/sessions", token, Some(json!({"vaultId":VAULT,"client":"native"})));
     assert_eq!(f.call(login(&f.account)).await.status(), StatusCode::UNAUTHORIZED);
     let account_token = account.encode();
@@ -1098,6 +1211,18 @@ async fn configured_discovery_and_origin_boundary() {
     f.setup().await;
     let second = call(host, None).await.unwrap();
     assert_eq!(read(second).await, json!({"protocolVersion":1,"setupRequired":false,"vaultId":VAULT}));
+    let device = |token: &str, refresh: bool, origin: Option<&str>| {
+        let mut request = device_request("POST", SYNC_DEVICE, refresh, token);
+        request.headers_mut().insert(header::HOST, host.parse().unwrap());
+        request.headers_mut().remove(header::ORIGIN);
+        if let Some(origin) = origin { request.headers_mut().insert(header::ORIGIN, origin.parse().unwrap()); }
+        request
+    };
+    let denied = app.clone().oneshot(device(&f.account, false, Some("https://ui.example.test"))).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let enrolled = response_json(app.clone().oneshot(device(&f.account, false, None)).await.unwrap()).await;
+    let refreshed = app.oneshot(device(enrolled["refreshToken"].as_str().unwrap(), true, None)).await.unwrap();
+    assert_eq!(refreshed.status(), StatusCode::OK);
     assert!(Boundary::configured("vault.example.test/path", None).is_err());
     assert!(Boundary::configured(host, Some("https://ui.example.test/")).is_err());
 }

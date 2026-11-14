@@ -12,6 +12,7 @@ A self-hosted password manager for logins, secure notes, SSH keys and files. The
 - Generate passwords, passphrases and usernames. Preview personal Bitwarden JSON imports, including password-protected exports, and see duplicate or changed items before importing.
 - Download encrypted attachments up to 100 MB on demand, keep selected files offline, or delete them with confirmation.
 - Edit cached items offline and sync when you reconnect. Review conflicting edits when two devices change the same item.
+- Enable Windows Hello in Settings to unlock and sync automatically with an updated server.
 - Recover access on a new device with your master password and offline recovery file. The Docker kit includes encrypted backup and restore with restic.
 
 ## Start here

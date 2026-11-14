@@ -70,4 +70,3 @@ export function unpackRevision(wire: WireRevision, expected: VaultKeyContext, ro
   decryptRecord(r, root, expected);
   return r;
 }
-

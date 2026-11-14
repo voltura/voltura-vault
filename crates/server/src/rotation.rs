@@ -237,6 +237,7 @@ pub fn activate_with_quarantine(
          DELETE FROM main.sessions;
          UPDATE main.sync_generation SET value=lower(hex(randomblob(16))) WHERE singleton=1;",
     )?;
+    super::device_sync::clear(&tx)?;
     tx.execute("UPDATE main.owner SET account=?1,recovery=?2,encrypted_config=?3,key_epoch=?4 WHERE singleton=1",
         params![account, recovery, config, epoch])?;
     // If the process stops before the SQL commit, startup fails closed at the

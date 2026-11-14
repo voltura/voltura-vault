@@ -1,5 +1,6 @@
 //! Private HTTPS-proxy backend. Bind only to loopback; never expose its HTTP
 //! listener directly.
+mod device_sync;
 mod files;
 pub use files::epoch_blobs;
 pub mod rotation;
@@ -28,11 +29,11 @@ use uuid::Uuid;
 use voltura_server_auth::{Purpose, SecretToken, Session, Verifier};
 use zeroize::Zeroize;
 
-const ORIGIN: &str = "https://vault-api.test";
+const ORIGIN: &str = match option_env!("VOLTURA_BUILD_API_ORIGIN") { Some(value) => value, None => "https://vault-api.test" };
 const DESKTOP_ORIGIN: &str = "https://tauri.localhost";
 const UNIX_DESKTOP_ORIGIN: &str = "tauri://localhost";
-const SEPARATE_WEB_ORIGIN: &str = "https://vault-ui.test";
-const HOST: &str = "vault-api.test";
+const SEPARATE_WEB_ORIGIN: &str = match option_env!("VOLTURA_BUILD_WEB_ORIGIN") { Some(value) => value, None => "https://vault-ui.test" };
+const HOST: &str = match option_env!("VOLTURA_BUILD_API_HOST") { Some(value) => value, None => "vault-api.test" };
 const COOKIE: &str = "__Host-vault_session";
 const SESSION_SECONDS: u64 = 900;
 const BOOTSTRAP_VAULT: [u8; 16] = [0; 16];
@@ -67,7 +68,7 @@ impl AppState {
         let mut db =
             Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if (1..=6).contains(&version) {
+        if (1..=7).contains(&version) {
             let tx = db.transaction()?;
             if version == 1 {
                 sync::create_schema(&tx)?;
@@ -78,9 +79,10 @@ impl AppState {
             if version <= 3 { add_key_epoch(&tx)?; }
             if version <= 4 { files::add_reservations(&tx)?; }
             if version <= 5 { writes::add_session_proof(&tx)?; }
-            files::add_deletions(&tx)?;
+            if version <= 6 { files::add_deletions(&tx)?; }
+            device_sync::add_schema(&tx)?;
             tx.commit()?;
-        } else if version != 7 {
+        } else if version != 8 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let epoch = db.query_row("SELECT key_epoch FROM owner WHERE singleton=1", [], |r| r.get::<_, u32>(0)).optional()?;
@@ -175,6 +177,7 @@ pub fn mark_restored(db: &mut Connection) -> rusqlite::Result<()> {
     tx.execute_batch(sync::CREATE_GENERATION)?;
     tx.execute("UPDATE sync_generation SET value=lower(hex(randomblob(16)))", [])?;
     tx.execute("DELETE FROM sessions", [])?;
+    device_sync::clear(&tx)?;
     tx.execute("DELETE FROM files WHERE published IS NULL", [])?;
     tx.commit()
 }
@@ -263,6 +266,7 @@ pub fn router_configured(mut state: AppState, boundary: Boundary) -> Router {
         .merge(sync::routes(state.clone()))
         .merge(files::routes(state.clone()))
         .merge(source_archives::routes())
+        .merge(device_sync::routes())
         .layer(middleware::from_fn(move |request, next| {
             boundary_request(request, next, boundary.clone())
         }))
@@ -571,39 +575,8 @@ async fn login(
     let result = state
         .database(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let stored: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT account FROM owner WHERE vault=?1",
-                    [vault.to_string()],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let verifier_account = Verifier::from_stored_digest(
-                vault.into_bytes(),
-                Purpose::Account,
-                digest(stored.ok_or_else(ApiError::unauthorized)?)?,
-            );
-            verifier_account
-                .verify(&presented, vault.into_bytes(), Purpose::Account)
-                .map_err(|_| ApiError::unauthorized())?;
-            tx.execute(
-                "DELETE FROM sessions WHERE expires<=?1 OR revoked=1",
-                [time],
-            )?;
-            let count: u32 = tx.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?;
-            if count >= 64 {
-                return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "session_limit"));
-            }
-            tx.execute(
-                "INSERT INTO sessions(digest,vault,issued,expires,revoked,write_key) VALUES(?1,?2,?3,?4,0,?5)",
-                params![
-                    verifier.digest().as_slice(),
-                    vault.to_string(),
-                    time,
-                    expires,
-                    write_key.as_ref().map(|key| key.as_slice())
-                ],
-            )?;
+            verify_account(&tx, vault, &presented)?;
+            insert_session(&tx, &verifier, vault, time, expires, write_key.as_ref(), None)?;
             tx.commit()?;
             Ok(())
         })
@@ -630,11 +603,36 @@ async fn login(
     }
 }
 
+fn verify_account(db: &Connection, vault: Uuid, presented: &str) -> Result<u32, ApiError> {
+    let stored: Option<(Vec<u8>, u32)> = db.query_row(
+        "SELECT account,key_epoch FROM owner WHERE vault=?1", [vault.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let (stored, epoch) = stored.ok_or_else(ApiError::unauthorized)?;
+    Verifier::from_stored_digest(vault.into_bytes(), Purpose::Account, digest(stored)?)
+        .verify(presented, vault.into_bytes(), Purpose::Account)
+        .map_err(|_| ApiError::unauthorized())?;
+    Ok(epoch)
+}
+
+fn insert_session(db: &Connection, verifier: &Verifier, vault: Uuid, time: u64, expires: u64,
+    write_key: Option<&[u8; 32]>, device: Option<&str>) -> Result<(), ApiError> {
+    db.execute("DELETE FROM sessions WHERE expires<=?1 OR revoked=1", [time])?;
+    let count: u32 = db.query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))?;
+    if count >= 64 {
+        return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "session_limit"));
+    }
+    db.execute("INSERT INTO sessions(digest,vault,issued,expires,revoked,write_key,device) VALUES(?1,?2,?3,?4,0,?5,?6)",
+        params![verifier.digest().as_slice(), vault.to_string(), time, expires, write_key.map(|key| key.as_slice()), device])?;
+    Ok(())
+}
+
 struct Authorized {
     hash: [u8; 32],
     vault: String,
     epoch: u32,
     expires: u64,
+    device: Option<String>,
 }
 fn authorize(db: &Connection, presented: &str, time: u64) -> Result<Authorized, ApiError> {
     let (vault, epoch): (String, u32) = db
@@ -649,14 +647,14 @@ fn authorize(db: &Connection, presented: &str, time: u64) -> Result<Authorized, 
     let verifier = SecretToken::parse(presented)
         .map_err(|_| ApiError::unauthorized())?
         .verifier(id, Purpose::Access);
-    let stored: Option<(u64, u64, bool)> = db
+    let stored: Option<(u64, u64, bool, Option<String>)> = db
         .query_row(
-            "SELECT issued,expires,revoked FROM sessions WHERE digest=?1",
+            "SELECT issued,expires,revoked,device FROM sessions WHERE digest=?1",
             [verifier.digest().as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (issued, expires, revoked) = stored.ok_or_else(ApiError::unauthorized)?;
+    let (issued, expires, revoked, device) = stored.ok_or_else(ApiError::unauthorized)?;
     let mut session =
         Session::new(verifier.clone(), issued, expires).map_err(|_| ApiError::unauthorized())?;
     if revoked {
@@ -670,7 +668,12 @@ fn authorize(db: &Connection, presented: &str, time: u64) -> Result<Authorized, 
         vault,
         epoch,
         expires,
+        device,
     })
+}
+
+pub fn revoke_sync_device(directory: &Path, device: Uuid) -> rusqlite::Result<bool> {
+    device_sync::revoke_on_disk(directory, device)
 }
 
 async fn session_info(

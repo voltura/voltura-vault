@@ -45,6 +45,11 @@ fn minimum_key_epoch() -> Result<u32, Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     match args.as_slice() {
+        [_, command, data, device] if command == "revoke-sync-device" => {
+            let removed = voltura_vault_server::revoke_sync_device(std::path::Path::new(data), device.parse()?)?;
+            println!("{}", if removed { "Device sync authorization revoked." } else { "No active authorization for this device." });
+            return Ok(());
+        }
         [_, command, data] if command == "rotation-point" => {
             println!("{}", serde_json::to_string(&rotation::inspect(PathBuf::from(data).as_path())?)?);
             return Ok(());
@@ -67,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
     if args.len() != 3 || !matches!(args[1].as_str(), "init" | "renew-setup" | "run" | "prepare-restore") {
-        return Err("Usage: voltura-vault-server init|renew-setup|run|prepare-restore|rotation-point DATA_DIRECTORY, or activate-rotation DATA_DIRECTORY REPLACEMENT_DATABASE ROTATION_POINT_FILE".into());
+        return Err("Usage: voltura-vault-server init|renew-setup|run|prepare-restore|rotation-point DATA_DIRECTORY, or activate-rotation DATA_DIRECTORY REPLACEMENT_DATABASE ROTATION_POINT_FILE, or revoke-sync-device DATA_DIRECTORY DEVICE_ID".into());
     }
     let directory = PathBuf::from(&args[2]);
     if args[1] == "prepare-restore" {

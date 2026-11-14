@@ -358,6 +358,7 @@ fn operation(method: &str, path: &str) -> Option<(Method, usize, bool)> {
     match (method, path) {
         ("GET", "config") => Some((Method::GET, 96 * 1024, false)),
         ("DELETE", "session") => Some((Method::DELETE, 4096, false)),
+        ("DELETE", _) if sync_device_operation(method, path) => Some((Method::DELETE, 4096, false)),
         ("POST", "bootstrap" | "sessions" | "mutations" | "files" | "files/deleted") => {
             Some((Method::POST, 96 * 1024, false))
         }
@@ -365,6 +366,7 @@ fn operation(method: &str, path: &str) -> Option<(Method, usize, bool)> {
         ("POST", "source-archives/list" | "recovery-kits/list") => {
             Some((Method::POST, 1024 * 1024, false))
         }
+        ("POST", _) if sync_device_operation(method, path) => Some((Method::POST, 4096, false)),
         ("POST", _) => match path.split('/').collect::<Vec<_>>().as_slice() {
             ["files", id, "finish" | "delete"] if uuid_segment(id) => {
                 Some((Method::POST, 4096, false))
@@ -383,6 +385,13 @@ fn operation(method: &str, path: &str) -> Option<(Method, usize, bool)> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn sync_device_operation(method: &str, path: &str) -> bool {
+    match (method, path.split('/').collect::<Vec<_>>().as_slice()) {
+        ("POST" | "DELETE", ["sync-devices", id]) | ("POST", ["sync-devices", id, "refresh"]) => uuid_segment(id),
+        _ => false,
     }
 }
 
@@ -417,8 +426,10 @@ pub async fn vault_request(
     target.check_ca_time()?;
     let invalid = "Invalid Vault API operation.";
     let (method, limit, binary) = operation(&call.method, &call.path).ok_or(invalid)?;
+    let device_sync = sync_device_operation(&call.method, &call.path);
+    let refresh = device_sync && call.path.ends_with("/refresh");
     let length = call.body.as_ref().map_or(0, String::len);
-    if (method == Method::POST) != call.body.is_some()
+    if (method == Method::POST || device_sync) != call.body.is_some()
         || length > MAX_REQUEST.div_ceil(3) * 4
         || call
             .token
@@ -428,7 +439,7 @@ pub async fn vault_request(
         || call
             .write_key
             .as_deref()
-            .is_some_and(|key| call.path != "sessions" || !opaque(key, 43))
+            .is_some_and(|key| (call.path != "sessions" && !refresh) || !opaque(key, 43))
         || call
             .proof
             .as_deref()
@@ -474,6 +485,14 @@ pub async fn vault_request(
         }
     } else if !target.saved && call.path != "config" && call.path != "session" {
         return Err("Finish pairing before syncing Vault data.".into());
+    }
+    if device_sync {
+        let input: serde_json::Value = serde_json::from_slice(body.as_deref().ok_or(invalid)?).map_err(|_| invalid)?;
+        let requested = input.get("vaultId").and_then(|id| id.as_str()).and_then(|id| Uuid::parse_str(id).ok());
+        let found = target.discover().await?;
+        if requested.is_none() || requested != target.profile.vault_id || requested != found.vault_id {
+            return Err("This server has a different vault. Your local data is still available.".into());
+        }
     }
     let mut request = target.client.request(
         method,
@@ -597,5 +616,11 @@ mod tests {
         ] {
             assert!(operation("POST", path).is_none(), "{path}");
         }
+        let device = "sync-devices/00000000-0000-4000-8000-000000000001";
+        assert!(operation("POST", device).is_some());
+        assert!(operation("DELETE", device).is_some());
+        assert!(operation("POST", &format!("{device}/refresh")).is_some());
+        assert!(operation("DELETE", &format!("{device}/refresh")).is_none());
+        assert!(operation("GET", device).is_none());
     }
 }
