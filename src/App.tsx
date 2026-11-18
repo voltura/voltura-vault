@@ -23,6 +23,7 @@ type Status = {
   exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable';
   rejectedServerData?: boolean; server?: string | null;
   hello?: HelloCredential; helloOnly?: boolean; helloSync?: boolean; helloSyncReconnect?: boolean; masterSession?: boolean;
+  helloSetupUntil?: number;
   requiresRecoveryFile?: boolean; importAvailable?: boolean;
 };
 export function App() {
@@ -95,7 +96,7 @@ export function App() {
     setRotationNeeded(false);
     setUnlocked(false); setNotes([]); setDraft(''); setPassword(''); setSetup(''); setRecoveryFile(undefined); setRecoveryDownloaded(false); setCalibration(undefined); setBusy(false); setError(''); setNotice(message);
     setEditor(itemDraft()); setSelected(-1); setNewItem(undefined); setMobileDetail(false);
-    setStatus(prior => ({ ...prior, pending: 0, attachments: [], helloOnly: false, masterSession: false, helloSyncReconnect: false }));
+    setStatus(prior => ({ ...prior, pending: 0, attachments: [], helloOnly: false, masterSession: false, helloSyncReconnect: false, helloSetupUntil: undefined }));
     setImportFile(undefined); setImportPassword(''); setImportPreview(undefined); setImportProgress(undefined);
     setSourceVersions(undefined);
     setRecoveryVersions(undefined);
@@ -348,7 +349,16 @@ export function App() {
       throw error;
     }
   }
-  async function enableHello(masterPassword: string) {
+  useEffect(() => {
+    const until = status.helloSetupUntil;
+    if (!until) return;
+    const timer = window.setTimeout(() => {
+      setStatus(prior => prior.helloSetupUntil === until ? { ...prior, helloSetupUntil: undefined } : prior);
+    }, Math.max(0, until - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [status.helloSetupUntil]);
+
+  async function enableHello(masterPassword?: string) {
     const current = generation.current;
     setHelloSetup(true);
     try { await finishHelloSetup(masterPassword); }
@@ -356,11 +366,16 @@ export function App() {
       if (current === generation.current) await client.current!.call('hello-cancel').catch(() => {});
       throw error;
     }
-    finally { if (current === generation.current) setHelloSetup(false); }
+    finally {
+      if (current === generation.current) {
+        setHelloSetup(false);
+        setStatus(prior => ({ ...prior, helloSetupUntil: undefined }));
+      }
+    }
   }
-  async function finishHelloSetup(masterPassword: string) {
+  async function finishHelloSetup(masterPassword?: string) {
     const current = generation.current;
-    setNotice('Checking your master password…');
+    if (masterPassword !== undefined) setNotice('Checking your master password…');
     const token = await client.current!.call<string>('hello-confirm', { password: masterPassword });
     if (current !== generation.current) return;
     if (!pendingBrowserHello.current) setNotice('Choose Windows Hello on this PC.');

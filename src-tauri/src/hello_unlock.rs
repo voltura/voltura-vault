@@ -31,11 +31,18 @@ mod win {
     struct Running;
     impl Drop for Running { fn drop(&mut self) { RUNNING.store(false, Ordering::Release); } }
     struct Attestation(*mut WEBAUTHN_CREDENTIAL_ATTESTATION);
+    impl Attestation {
+        fn prf_output(&self) -> *mut WEBAUTHN_HMAC_SECRET_SALT {
+            unsafe {
+                if (*self.0).dwVersion < 7 { return ptr::null_mut(); }
+                (*self.0.cast::<AttestationV7>()).prf
+            }
+        }
+    }
     impl Drop for Attestation {
         fn drop(&mut self) {
             unsafe {
-                let value = &*self.0;
-                if value.dwVersion >= 7 { wipe_output((*self.0.cast::<AttestationV7>()).prf); }
+                wipe_output(self.prf_output());
                 WebAuthNFreeCredentialAttestation(Some(self.0));
             }
         }
@@ -83,7 +90,7 @@ mod win {
         Ok(Running)
     }
 
-    pub fn enroll(window: isize, mut input: Vec<u8>) -> Result<String, String> {
+    pub fn enroll(window: isize, mut input: Vec<u8>) -> Result<Vec<u8>, String> {
         let _running = begin()?;
         if input.len() != 32 { return Err("Invalid Windows Hello enrollment.".into()); }
         let hwnd = HWND(window as *mut core::ffi::c_void);
@@ -113,14 +120,25 @@ mod win {
         if attestation_ptr.is_null() { return Err("Windows returned no credential".into()); }
         let attestation = Attestation(attestation_ptr);
         let value = unsafe { &*attestation.0 };
-        // A successful assertion must return the unlock secret before the vault is enrolled.
         let auth = unsafe { checked_auth(value.pbAuthenticatorData, value.cbAuthenticatorData, true)? };
         let aaguid: String = auth[37..53].iter().map(|byte| format!("{byte:02x}")).collect();
         if !matches!(aaguid.as_str(), "08987058cadc4b81b6e130de50dcbe96" | "9ddd1817af5a4672a2b93e3dd95000a9" | "6028b017b1d44c02b4b3afcdafc96bb2") {
             return Err("Choose Windows Hello on this PC when saving the passkey.".into());
         }
         if value.pbCredentialId.is_null() || value.cbCredentialId == 0 || value.cbCredentialId > 1024 { return Err("Invalid credential identifier".into()); }
-        Ok(URL_SAFE_NO_PAD.encode(unsafe { slice::from_raw_parts(value.pbCredentialId, value.cbCredentialId as usize) }))
+        let id = URL_SAFE_NO_PAD.encode(unsafe { slice::from_raw_parts(value.pbCredentialId, value.cbCredentialId as usize) });
+        let prf = if version >= 8 {
+            unsafe { attestation.prf_output().as_ref() }
+                .filter(|secret| secret.cbFirst == 32 && !secret.pbFirst.is_null())
+                .map(|secret| unsafe { slice::from_raw_parts(secret.pbFirst, 32) })
+        } else { None };
+        // Binary IPC sends the optional PRF length and bytes followed by the base64url credential ID.
+        let prf = prf.unwrap_or_default();
+        let mut result = Vec::with_capacity(1 + prf.len() + id.len());
+        result.push(prf.len() as u8);
+        result.extend_from_slice(prf);
+        result.extend_from_slice(id.as_bytes());
+        Ok(result)
     }
 
     pub fn evaluate(window: isize, credential_id: &str, mut input: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {

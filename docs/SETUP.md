@@ -1,11 +1,11 @@
-# Set up Voltura Vault 0.1.2-alpha
+# Set up Voltura Vault 0.1.3-alpha
 
 Use synthetic data to try the alpha. Keep the vault API on a private LAN or
 an existing VPN such as WireGuard. The operator provides DNS, network access,
 and a TLS certificate and key for the API hostname.
 
 Get the desktop package, Docker kit and `SHA256SUMS.txt` from the
-[v0.1.2-alpha release](https://github.com/voltura/voltura-vault/releases/tag/v0.1.2-alpha).
+[v0.1.3-alpha release](https://github.com/voltura/voltura-vault/releases/tag/v0.1.3-alpha).
 
 ## Server
 
@@ -65,7 +65,7 @@ uses the build tag, which points to the same commit as the release tag. Replace
 
 ```sh
 sha256sum -c SHA256SUMS.txt
-gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.2-alpha --signer-workflow voltura/voltura-vault/.github/workflows/public-prerelease.yml
+gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/tags/v0.1.3-alpha --signer-workflow voltura/voltura-vault/.github/workflows/public-prerelease.yml
 ```
 
 1. Open **Connect to Vault** and enter the root HTTPS URL. If the issuer is
@@ -77,9 +77,11 @@ gh attestation verify ./PACKAGE --repo voltura/voltura-vault --source-ref refs/t
    time measurement when prompted. On another device, enter the same URL and
    use the existing master password and recovery file.
 3. After the first unlock, Windows users can enable Windows Hello in Settings.
-   Confirm the master password once to enable unlock and automatic sync with an
-   updated Vault server. If sync authorization expires or is revoked, choose
-   **Reconnect sync** while the vault is open.
+   A master password unlock authorizes setup once for up to five minutes or
+   until the vault locks. After that, enter the master password in Settings.
+   Windows Hello may prompt again to finish setup on some devices. If automatic
+   sync authorization expires or is revoked, choose **Reconnect sync** while
+   the vault is open.
 
 The alpha supports one paired server per desktop installation profile. Before
 changing servers, save the open edit, sync, and choose **Check before changing

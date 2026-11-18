@@ -44,7 +44,17 @@ export async function enrollHello(): Promise<{ credential: HelloCredential; secr
   const input = crypto.getRandomValues(new Uint8Array(32));
   if (native()) {
     const { invoke } = await import('@tauri-apps/api/core');
-    return { credential: { id: await invoke<string>('hello_enroll', { input: Array.from(input) }), input } };
+    const result = new Uint8Array(await invoke<ArrayBuffer>('hello_enroll', { input: Array.from(input) }));
+    const length = result[0];
+    try {
+      if (length !== 0 && length !== 32) throw Error();
+      const id = new TextDecoder('utf-8', { fatal: true }).decode(result.subarray(1 + length));
+      if (!/^[A-Za-z0-9_-]{1,1366}$/.test(id)) throw Error();
+      return { credential: { id, input }, secret: length ? result.subarray(1, 1 + length) : undefined };
+    } catch {
+      result.fill(0);
+      throw Error('Windows Hello returned an invalid enrollment.');
+    }
   }
   if (!canUseHello()) throw Error('Open the installed Windows app to set up Windows Hello.');
   const credential = await navigator.credentials.create({ publicKey: {

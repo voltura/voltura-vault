@@ -34,10 +34,11 @@ fn installed_window(window: &tauri::WebviewWindow) -> Result<isize, String> {
 
 #[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]
 #[tauri::command]
-async fn hello_enroll(window: tauri::WebviewWindow, input: Vec<u8>) -> Result<String, String> {
+async fn hello_enroll(window: tauri::WebviewWindow, input: Vec<u8>) -> Result<tauri::ipc::Response, String> {
     let handle = installed_window(&window)?;
-    tauri::async_runtime::spawn_blocking(move || hello_unlock::enroll(handle, input))
-        .await.map_err(|_| "Windows Hello could not start.".to_string())?
+    let enrollment = tauri::async_runtime::spawn_blocking(move || hello_unlock::enroll(handle, input))
+        .await.map_err(|_| "Windows Hello could not start.".to_string())??;
+    Ok(tauri::ipc::Response::new(enrollment))
 }
 
 #[cfg(all(windows, any(feature = "vpn-client", feature = "public-desktop")))]

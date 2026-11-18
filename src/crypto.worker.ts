@@ -23,6 +23,8 @@ let pendingRecoveryDigest: Uint8Array | undefined;
 let importPlan: { items: Revision[]; folders: Revision[] } | undefined;
 let calibration: Calibration | undefined;
 let helloEnrollment: { token: string; expires: number; account?: Uint8Array } | undefined;
+const recentMasterUnlockMs = 5 * 60_000;
+let recentMasterUnlockUntil = 0;
 let sessionTimeout = 0, sessionExpires = 0, sessionObserved = 0;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 let sessionView: { page: string; objectId?: string } = { page: 'vault' };
@@ -81,6 +83,7 @@ function clearSession() {
   root = account = syncKey = undefined; envelope = undefined; importPlan = undefined; calibration = undefined;
   syncReconnect = false;
   clearHelloEnrollment();
+  recentMasterUnlockUntil = 0;
   sessionTimeout = sessionExpires = sessionObserved = 0;
   sessionView = { page: 'vault' };
 }
@@ -151,6 +154,8 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
   checkSession();
   if (helloEnrollment && helloEnrollment.expires <= Date.now()) clearHelloEnrollment();
   const windowsApp = windows && self.location.origin === 'https://tauri.localhost';
+  const helloSetupUntil = () => root && envelope && Date.now() < recentMasterUnlockUntil &&
+    (!windowsApp || !envelope.account || account) ? recentMasterUnlockUntil : undefined;
   const syncCredential = () => {
     if (account) return account;
     const e = envelope, key = syncKey;
@@ -215,6 +220,7 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         importAvailable: canImport(), exists: !!local || remote === 'configured', pending: key ? pending : 0, attachments,
         rejectedServerData: !!key && rejectedServerData,
         hello: savedHello ? { id: savedHello.id, input: savedHello.input } : undefined,
+        helloSetupUntil: helloSetupUntil(),
         helloSync: !!savedSync,
         helloSyncReconnect: !!(key && savedSync && syncReconnect),
         masterSession: !!(key && account),
@@ -224,13 +230,20 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
       unlocked();
       clearHelloEnrollment();
       const e = envelope!;
+      const recent = helloSetupUntil();
+      recentMasterUnlockUntil = 0;
       let verified: Uint8Array | undefined, accountProof: Uint8Array | undefined;
       try {
-        const capture = windowsApp && e.account ? (token: Uint8Array) => { accountProof = token.slice(); } : undefined;
-        try { verified = await confirmPassword(String(payload.password), e, capture); }
-        catch { throw Error('The master password is incorrect.'); }
-        checkSession();
-        if (!sodium.memcmp(unlocked(), verified)) throw Error('Unlock the vault with your master password first.');
+        if (typeof payload.password === 'string') {
+          const capture = windowsApp && e.account ? (token: Uint8Array) => { accountProof = token.slice(); } : undefined;
+          try { verified = await confirmPassword(payload.password, e, capture); }
+          catch { throw Error('The master password is incorrect.'); }
+          checkSession();
+          if (!sodium.memcmp(unlocked(), verified)) throw Error('Unlock the vault with your master password first.');
+        } else {
+          if (!recent) throw Error('Confirm your master password to set up Windows Hello.');
+          if (windowsApp && e.account) accountProof = account!.slice();
+        }
         const token = crypto.randomUUID();
         helloEnrollment = { token, expires: Date.now() + 135_000, account: accountProof };
         accountProof = undefined;
@@ -439,7 +452,12 @@ async function handle(type: string, payload: Record<string, unknown>, progress: 
         }
         envelope = e;
         if (e.context.epoch > 1) await retireGeneratorHistory(e.context).catch(() => undefined);
-        startSession(payload.idleMs); return await notes();
+        startSession(payload.idleMs);
+        const result = await notes();
+        checkSession();
+        unlocked();
+        if (sessionTimeout) recentMasterUnlockUntil = Date.now() + recentMasterUnlockMs;
+        return result;
       } catch (error) {
         clearSession();
         if (publicDesktop && !local && error instanceof Error && error.message.includes('different vault')) throw error;
