@@ -1,6 +1,6 @@
 {
   "name": "voltura-vault",
-  "version": "0.1.2-alpha",
+  "version": "0.1.3-alpha",
   "private": true,
   "type": "module",
   "description": "A private vault for passwords, notes, and files",

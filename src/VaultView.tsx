@@ -21,7 +21,7 @@ const testBuild = !import.meta.env.VITE_VAULT_PRODUCTION_RELEASE;
 export type Page = 'vault' | 'device' | 'attachments';
 export type Model = {
   page: Page; unlocked: boolean; hidden: boolean; busy: boolean; notice: string; error: string; syncPaused: boolean; rotationNeeded: boolean;
-  status: { exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable'; hello?: HelloCredential; helloOnly?: boolean; helloSyncReconnect?: boolean; masterSession?: boolean; server?: string | null; requiresRecoveryFile?: boolean; importAvailable?: boolean; rejectedServerData?: boolean };
+  status: { exists: boolean; pending: number; attachments: AttachmentView[]; remote: 'local' | 'new' | 'configured' | 'unavailable'; hello?: HelloCredential; helloOnly?: boolean; helloSyncReconnect?: boolean; masterSession?: boolean; helloSetupUntil?: number; server?: string | null; requiresRecoveryFile?: boolean; importAvailable?: boolean; rejectedServerData?: boolean };
   notes: VaultRecord[]; selected: number; newItem?: ImportedItem; draft: string; dirty: boolean;
   editor: ItemDraft;
   password: string; setup: string; recoveryFile?: File; recoveryDownloaded: boolean; calibration?: Calibration; online: boolean; mobileDetail: boolean;
@@ -46,7 +46,7 @@ export type Actions = {
   generatorHistory: (action: HistoryAction) => Promise<HistoryEntry[]>;
   setTheme: (value: string) => void; setPalette: (value: string) => void; setTimeout: (value: number) => void;
   setClipboardSeconds: (value: number) => void;
-  unlockHello: () => void; enableHello: (password: string) => void; reconnectHelloSync: (password: string) => void; disableHello: () => void;
+  unlockHello: () => void; enableHello: (password?: string) => void; reconnectHelloSync: (password: string) => void; disableHello: () => void;
   confirmBrowserHello: () => void;
   checkStorage: (persist: boolean) => void;
   recoverRotation: (password: string, recoveryFile: File) => void;
@@ -136,28 +136,32 @@ export function VaultView(props: { model: Model; actions: Actions }) {
   return <VaultSurface key={String(props.model.unlocked)} {...props}/>;
 }
 
-function HelloSetupFields({ busy, enable, label = 'Enable Windows Hello', hint = 'Save the passkey to this Windows device when prompted.' }: {
-  busy: boolean; enable: Actions['enableHello']; label?: string; hint?: string;
+function HelloSetupFields({ busy, enable, recentUnlock, label = 'Enable Windows Hello', hint = 'Save the passkey to this Windows device when prompted.' }: {
+  busy: boolean; enable: (password: string) => void; recentUnlock?: () => void; label?: string; hint?: string;
 }) {
   const id = useId();
   const input = useRef<HTMLInputElement>(null);
   function confirm() {
+    if (busy) return;
+    if (recentUnlock) { recentUnlock(); return; }
     const field = input.current;
-    if (busy || !field || !field.reportValidity()) return;
+    if (!field || !field.reportValidity()) return;
     const password = field.value;
     field.value = '';
     enable(password);
   }
   return <div>
     {hint && <p className="fine">{hint}</p>}
-    <label htmlFor={id}>Confirm master password</label>
-    <input ref={input} id={id} type="password" autoComplete="off" required maxLength={1024} disabled={busy}
-      onKeyDown={event => {
-        if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-          event.preventDefault();
-          confirm();
-        }
-      }}/>
+    {!recentUnlock && <>
+      <label htmlFor={id}>Confirm master password</label>
+      <input ref={input} id={id} type="password" autoComplete="off" required maxLength={1024} disabled={busy}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            confirm();
+          }
+        }}/>
+    </>}
     <button className="calibrate-button" type="button" disabled={busy} onClick={confirm}>{label}</button>
   </div>;
 }
@@ -557,6 +561,7 @@ function VaultSurface({ model: m, actions: a }: { model: Model; actions: Actions
                     <button type="button" disabled={m.busy} onClick={a.confirmBrowserHello}>Confirm Windows Hello</button>
                   </>
                   : <HelloSetupFields busy={m.busy || (m.windowsVault && m.status.remote === 'configured' && !m.online)}
+                    recentUnlock={m.status.helloSetupUntil && Date.now() < m.status.helloSetupUntil ? () => a.enableHello() : undefined}
                     enable={a.enableHello} hint={m.windowsVault && m.status.remote === 'configured'
                       ? m.online ? '' : 'Connect to your vault to set up Windows Hello.'
                       : undefined}/>}

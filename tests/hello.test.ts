@@ -4,6 +4,34 @@ import { enrollHello, evaluateHello } from '../src/hello';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it.each([0, 32])('decodes native enrollment with %i bytes of PRF output', async length => {
+  const response = new Uint8Array(1 + length + 4);
+  response[0] = length;
+  response.fill(7, 1, 1 + length);
+  response.set(new TextEncoder().encode('AQID'), 1 + length);
+  const invoke = vi.fn().mockResolvedValue(response.buffer);
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: { invoke } });
+  vi.stubGlobal('location', { origin: 'https://tauri.localhost' });
+
+  const { credential, secret } = await enrollHello();
+  expect(credential.id).toBe('AQID');
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('hello_enroll', { input: Array.from(credential.input) }, undefined);
+  expect(secret).toEqual(length ? new Uint8Array(32).fill(7) : undefined);
+  secret?.fill(0);
+  expect(response.slice(1, 1 + length)).toEqual(new Uint8Array(length));
+});
+
+it('wipes the native PRF result if the enrollment credential is malformed', async () => {
+  const response = new Uint8Array(34).fill(7);
+  response[0] = 32;
+  const invoke = vi.fn().mockResolvedValue(response.buffer);
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: { invoke } });
+  vi.stubGlobal('location', { origin: 'https://tauri.localhost' });
+
+  await expect(enrollHello()).rejects.toThrow('Windows Hello returned an invalid enrollment.');
+  expect(response).toEqual(new Uint8Array(34));
+});
+
 it('uses a creation PRF result only after verifying a local Windows Hello credential', async () => {
   const origin = 'https://vault-ui.test';
   const authenticatorData = new Uint8Array(55);
